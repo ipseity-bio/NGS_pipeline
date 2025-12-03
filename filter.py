@@ -27,8 +27,9 @@ def read_vcf_no_meta(path: str) -> pd.DataFrame:
     df = df.rename(columns={"CHROM": "CHROM", "#CHROM": "CHROM"})
     return df
 
-
-def parse_sample_by_format(df: pd.DataFrame, sample_col="sample") -> pd.DataFrame:
+def parse_sample_by_format(df: pd.DataFrame) -> pd.DataFrame:
+    # take the last column as the sample column
+    sample_col = df.columns[-1]
 
     fmt_keys = df["FORMAT"].fillna("").str.split(":")
     sample_vals = df[sample_col].fillna("").str.split(":")
@@ -58,7 +59,7 @@ def parse_sample_by_format(df: pd.DataFrame, sample_col="sample") -> pd.DataFram
 
 def load_freebayes_metrics(freebayes_path: str) -> pd.DataFrame:
     fb = read_vcf_no_meta(freebayes_path)
-    fb = parse_sample_by_format(fb, sample_col="sample")
+    fb = parse_sample_by_format(fb)  # no sample_col arg now
 
     # normalize types for merge
     fb["POS"] = pd.to_numeric(fb["POS"], errors="coerce")
@@ -72,6 +73,7 @@ def load_freebayes_metrics(freebayes_path: str) -> pd.DataFrame:
         }
     )
     return metrics
+
 
 ###
 import numpy as np
@@ -111,7 +113,8 @@ def add_pos_candidates(df, location_col="Location"):
   
 def load_freebayes_full(freebayes_path: str) -> pd.DataFrame:
     fb = read_vcf_no_meta(freebayes_path)
-    fb = parse_sample_by_format(fb, sample_col="sample")
+    #fb = parse_sample_by_format(fb, sample_col="sample")
+    fb = parse_sample_by_format(fb)
 
     fb["POS"] = pd.to_numeric(fb["POS"], errors="coerce")
     fb["ALT_LIST"] = fb["ALT"].astype(str).str.split(",")
@@ -234,25 +237,34 @@ def process_vcf(
 
 
         haplocall=pd.read_csv(io.StringIO(''.join(lines_1)),dtype=str,sep='\t').rename(columns={'#CHROM': 'CHROM'})
+        
+        haplocall = pd.read_csv(
+            io.StringIO(''.join(lines_1)),
+            dtype=str,
+            sep='\t'
+        ).rename(columns={'#CHROM': 'CHROM'})
 
+        # take the last column as the sample genotype column
+        sample_col = haplocall.columns[-1]
 
         
         final = add_pos_candidates(final, location_col="Location")
         haplocall["POS"] = pd.to_numeric(haplocall["POS"], errors="coerce")
 
         m1 = final.merge(haplocall, left_on="POS_START", right_on="POS", how="left")
-        need2 = m1["sample"].isna()
+        need2 = m1[sample_col].isna()
 
         m2 = final.loc[need2].merge(haplocall, left_on="POS_ANCHOR", right_on="POS", how="left")
         m1.loc[need2, haplocall.columns] = m2[haplocall.columns].values
 
         DP_GQ_Zygo = m1
 
+        DP_GQ_Zygo['Genotype (GT)'] = DP_GQ_Zygo[sample_col].str.split(':').str[0]
+        DP_GQ_Zygo['Depth of Coverage (DP)'] = DP_GQ_Zygo[sample_col].str.split(':').str[2]
+        DP_GQ_Zygo['Genotype Quality (GQ)'] = DP_GQ_Zygo[sample_col].str.split(':').str[3]
+        DP_GQ_Zygo['AD_ALT'] = DP_GQ_Zygo[sample_col].str.split(':').str[1].str.split(',').str[1]
 
-        DP_GQ_Zygo['Genotype (GT)'] = DP_GQ_Zygo['sample'].str.split(':').str[0]
-        DP_GQ_Zygo['Depth of Coverage (DP)'] = DP_GQ_Zygo['sample'].str.split(':').str[2]
-        DP_GQ_Zygo['Genotype Quality (GQ)'] = DP_GQ_Zygo['sample'].str.split(':').str[3]
-        DP_GQ_Zygo['AD_ALT'] = DP_GQ_Zygo['sample'].str.split(':').str[1].str.split(',').str[1]
+
 
         DP_GQ_Zygo['AD_ALT'] = pd.to_numeric(DP_GQ_Zygo['AD_ALT'], errors='coerce')
         DP_GQ_Zygo['Depth of Coverage (DP)'] = pd.to_numeric(DP_GQ_Zygo['Depth of Coverage (DP)'], errors='coerce')
