@@ -1,321 +1,319 @@
-# NGS Variant Calling & Annotation Pipeline
+# NGS Variant Calling and Annotation Pipeline
 
-*A complete Snakemake-based workflow for GRCh37*
+Snakemake workflow for targeted germline small-variant calling, annotation, and report-oriented prioritization in a GRCh37-based analysis setting.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Workflow-Snakemake-blue?style=for-the-badge">
-  <img src="https://img.shields.io/badge/Annotation-VEP%20(Docker)-orange?style=for-the-badge">
-  <img src="https://img.shields.io/badge/Genome-GRCh37-green?style=for-the-badge">
-</p>
+## Repository Layout
 
----
-
-## 📘 Overview
-
-This repository provides a full NGS analysis workflow for:
-
-* FASTQ QC trimming
-* Alignment using **bwa**
-* Duplicate marking & BQSR (GATK)
-* Variant calling (GATK + FreeBayes)
-* Filtering & normalization
-* Annotation using **Ensembl VEP via Docker**
-* Coverage analysis
-* Pseudogene filtering
-* Automated true-positive variant reporting
-
-The primary workflow is implemented in **Snakemake**, with downstream processing in **Python** and **Bash**.
-
----
-
-## ⚙️ Requirements
-
-### **Software**
-
-| Tool                               | Purpose                                    |
-| ---------------------------------- | ------------------------------------------ |
-| Snakemake                          | Workflow management                        |
-| fastp                              | Read trimming                              |
-| bwa                                | Alignment                                  |
-| samtools                           | Sorting, indexing, depth                   |
-| GATK4                              | MarkDuplicatesSpark, BQSR, HaplotypeCaller |
-| freebayes                          | Alternative variant caller                 |
-| bcftools                           | Variant filtering/normalization            |
-| bedtools                           | Pseudogene region intersections            |
-| Docker                             | Required for VEP annotation                |
-| Python 3                           | Required for post-processing scripts       |
-| Python packages: `pandas`, `numpy` | CSV/VCF processing                         |
-
----
-
-## 🧬 Data Requirements (Must Provide)
-
-The pipeline **will not run without these files**.  
-All coordinates must match **GRCh37**.
-
-### 1) Reference Genome (GRCh37)
-You need:
-- `GRCh37.fa` (FASTA)
-- `GRCh37.fa.fai` (FASTA index)
-- `GRCh37.dict` (sequence dictionary)
-
-Create indexes if missing:
-
-```bash
-samtools faidx GRCh37.fa
-gatk CreateSequenceDictionary -R GRCh37.fa
-bwa index GRCh37.fa
-````
-
-`config.yaml` keys:
-
-```yaml
-ref: "./GRCh37.p13.genome.fa"
-bwa_index: "./GRCh37.p13.genome.fa"
+```text
+README.md
+run.sh
+config/
+  config.yaml
+workflow/
+  Snakefile
+  rules/
+  scripts/
 ```
 
----
+## Workflow Summary
 
-### 2) Known Sites VCF (for BQSR)
+The pipeline performs:
 
-Any GRCh37-known-sites VCF, e.g. Mills/1000G indels.
+- `fastp` read trimming
+- `bwa` alignment
+- `GATK` duplicate marking, BQSR, and HaplotypeCaller
+- `FreeBayes` secondary calling
+- `bcftools` normalization and filtering
+- `Ensembl VEP` annotation
+- coverage, pseudogene-region flagging, and final report generation
 
-`config.yaml`:
+## Requirements
 
-```yaml
-known_sites: "./Mills_and_1000G_gold_standard.indels.b37.vcf"
-```
+### Software
 
----
+- `Snakemake` compatible with `--use-singularity`
+- `Singularity` or `Apptainer` for rule-level container execution
+- `bash`
+- `python3`
+- `zip`
 
-### 4) VEP Cache
+The main analysis tools are executed through pinned container images defined in `config/config.yaml`. Host installation of `bwa`, `samtools`, `gatk`, `bcftools`, `freebayes`, or `vep` is not required for the core Snakemake workflow.
 
-Download and store the Ensembl VEP cache **locally**.
+### Host-side scripts
 
-Example cache directory:
+The post-processing wrapper uses:
 
-```
-VEP_data/
-└── homo_sapiens/
-    └── 115_GRCh37/ 
-```
+- `python3`
+- `bash`
+- `zip`
 
-`config.yaml`:
+No extra Python package installation is required for the wrapper in the current release.
 
-```yaml
-docker_data: "./VEP_data"
-```
+## Scope
 
-> The pipeline mounts this directory into the VEP docker container.
+The current workflow is intended for:
 
----
+- targeted-panel germline analysis
+- short-read paired-end Illumina data
+- single-sample SNV and short-indel calling
+- GRCh37-based reference resources
 
-### 5) ClinVar / Variant Summary Reference
+The current workflow does not support:
 
-Used during filtering + reporting.
+- structural variants
+- copy-number variants
+- repeat expansions
+- mitochondrial variant analysis
+- joint genotyping
+- trio-aware or population-scale calling
 
-Required:
+## Data Requirements
 
-* `variant_summary.txt` (download from https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/ and update the path in run_filter.py)
+The workflow will not run without GRCh37-matched reference and annotation resources.
 
----
+Required inputs and resources:
 
-## 🔧 Configuration
+- paired-end FASTQ files in `input_dir`
+- reference FASTA in `references.ref`
+- BWA index generated from the same FASTA in `references.bwa_index`
+- target BED file in `references.bed_file`
+- known-sites VCF for BQSR in `references.known_sites`
+- local VEP cache directory in `references.vep_cache`
+- pseudogene BED file in `references.pseudogene_bed`
+- ClinVar `variant_summary.txt` in `postprocess.variant_summary`
 
-Modify `config.yaml` to match your reference paths and thresholds:
+ClinVar variant summary reference:
 
-```yaml
-bed_file: "regions.bed"
-
-filter_thresholds:
-  DP: 30
-  GQ: 99
-
-known_sites: "./Mills_and_1000G_gold_standard.indels.b37.vcf"
-ref: "./GRCh37.p13.genome.fa"
-docker_data: "./VEP_data"
-bwa_index: "./GRCh37.p13.genome.fa"
-```
-
----
-
-### FASTQ Naming Convention
-
-FASTQs must be in the form:
-
-```
-<sample>_R1_001.fastq.gz
-<sample>_R2_001.fastq.gz
-```
+- download from `https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/`
+- use `variant_summary.txt.gz` from ClinVar
+- decompress it to `variant_summary.txt`
+- set the path in `config/config.yaml` under `postprocess.variant_summary`
 
 Example:
 
+```bash
+wget https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz
+gunzip variant_summary.txt.gz
 ```
-Patient01_R1_001.fastq.gz → sample = Patient01
-```
 
----
+Reference FASTA prerequisites:
 
-## ▶️ Running the Pipeline
+- FASTA file
+- FASTA index (`.fai`)
+- sequence dictionary (`.dict`)
+- BWA index sidecar files
 
-### **🔹 Option A — One-Click Execution**
-
-This runs the entire Snakemake pipeline + post-processing:
+If these are not already available, create them with:
 
 ```bash
-bash run.sh
+samtools faidx GRCh37.p13.genome.fa
+gatk CreateSequenceDictionary -R GRCh37.p13.genome.fa
+bwa index GRCh37.p13.genome.fa
 ```
 
----
+Expected VEP cache layout:
 
-### **🔹 Option B — Manual Execution**
-
-#### **1. Run Snakemake**
-
-```bash
-snakemake \
-  --cores 32 \
-  --keep-going \
-  --snakefile snakemake.smk \
-  --configfile config.yaml
+```text
+VEP_data/
+  homo_sapiens/
+    115_GRCh37/
 ```
 
----
+## Configuration
 
-#### **2. Run Post-Processing**
+Edit `config/config.yaml`.
 
-```bash
-bash run_post_process.sh
-```
+Main settings:
 
-This will run:
+- `input_dir`: directory containing FASTQ files
+- `output_dir`: root directory for all pipeline outputs
+- `references.ref`: reference FASTA
+- `references.bwa_index`: BWA index prefix
+- `references.known_sites`: known-sites VCF for BQSR
+- `references.bed_file`: target BED file
+- `references.vep_cache`: local VEP cache directory
+- `references.pseudogene_bed`: pseudogene BED file
+- `filter_thresholds.DP`: depth threshold
+- `filter_thresholds.GQ`: genotype-quality threshold
+- `resources.gatk_mem_mb`: Java memory for GATK rules
+- `resources.tmpdir`: temporary directory
+- `postprocess.variant_summary`: ClinVar variant summary file
+- `postprocess.qc_min_30x`: QC threshold for 30X coverage
+- `postprocess.positive_control_min_30x`: positive-control threshold
+- `postprocess.ntc_max_30x`: NTC threshold
+- `containers.*`: rule-level container images
 
-1. `run_filter.py`
-2. `depth.py`
-3. `pseudogene_check.sh`
-4. `coverage_table.py`
-5. `coverage_summary.py`
-6. `True_positive_filter.py` 
+FASTQs must follow:
 
----
-
-## 📤 Output Summary
-
-### **After Snakemake**
-
-| Output                     | Description                  |
-| -------------------------- | ---------------------------- |
-| `<sample>_recal.bam`       | Final BAM after BQSR         |
-| `<sample>_variants.vcf`    | GATK HaplotypeCaller output  |
-| `<sample>_freebayes.vcf`   | FreeBayes output             |
-| `<sample>_filtered.vcf.gz` | Variant-level filtered VCF   |
-| `<sample>_vep.vcf`         | GATK variants annotated      |
-| `<sample>_fb_vep.vcf`      | FreeBayes variants annotated |
-| `<sample>_merged_vep.vcf`  | Combined annotation          |
-
----
-
-### **After Post-Processing**
-
-| Output                             | Purpose                                       |
-| ---------------------------------- | --------------------------------------------- |
-| `<sample>_raw_output.csv`          | VEP + ClinVar merged dataset                  |
-| `<sample>_output_p.csv`            | Pathogenic/Likely Pathogenic filtered list    |
-| `<sample>_all_coverage.txt`        | Per-base depth across regions                 |
-| `<folder>_coverage_summary.csv`    | Combined coverage summary                     |
-| `<sample>_pseudogene_variants.txt` | Intersections with pseudogene regions         |
-| `<sample>_filtered_tp.csv`         | True-positive filtered table (from TP script) |
-| `<sample>_filtered_tp_report.csv`  | Final clinical-style TP report                |
-| `true_positive.zip`                | Packaged TP files                             |
-| `true_positive_report.zip`         | Packaged report files                         |
-
----
-
-## 🧩 What Each Script Does
-
-### ✔ `run_filter.py` + `filter.py`
-
-* Joins VEP annotations with ClinVar data
-* Produces raw & pathogenic-only CSVs
-
----
-
-### ✔ `depth.py`
-
-Computes per-base depth:
-
-```bash
-samtools depth -b regions.bed <sample>_recal.bam
-```
-
----
-
-### ✔ `coverage_table.py`
-
-Aggregates all sample-level depth files → single summary CSV.
-
----
-
-### ✔ `coverage_summary.py`
-
-Adds QC fields:
-
-* Mean depth
-* % bases ≥30×
-* QC status
-
----
-
-### ✔ `pseudogene_check.sh`
-
-Uses bedtools to detect pseudogene-overlapping variants.
-
----
-
-### ✔ `True_positive_filter.py`
-
-* Enforces population frequency thresholds
-* Creates formatted TP report
-* Adds panel coverage + mean depth
-* Outputs
-
-  * `<sample>_filtered_tp.csv`
-  * `<sample>_filtered_tp_report.csv`
-
----
-
-## ⚠️ Troubleshooting
-
-### ❗ VEP Errors
-
-Ensure your Docker VEP cache is downloaded and the path exists:
-
-```
-docker_data: "./VEP_data"
-```
-
----
-
-### ❗ FASTQs Not Detected
-
-Check naming:
-
-```
+```text
 <sample>_R1_001.fastq.gz
 <sample>_R2_001.fastq.gz
 ```
 
----
+## Running
 
-## 📜 Citation
+Run the full workflow:
 
-If you use this pipeline in research or reporting, please cite:
+```bash
+CORES=16 bash run.sh
+```
 
-* GATK
-* FreeBayes
-* VEP
-* Snakemake
-* fastp
-* bwa
-* samtools
-* bcftools
+If your input, reference, or cache paths live outside the project directory, bind them into the container runtime.
+
+Typical example:
+
+```bash
+SINGULARITY_ARGS="--bind /home --bind /mnt" CORES=16 bash run.sh
+```
+
+If all required paths share a common parent, binding that parent is usually sufficient.
+
+Common cases that require bind mounts:
+
+- FASTQs in `/home/...` or `/mnt/...`
+- reference FASTA and BWA index outside the repository
+- VEP cache outside the repository
+- output directory outside the repository
+
+Direct Snakemake execution:
+
+```bash
+snakemake \
+  --use-singularity \
+  --singularity-args "--bind /home --bind /mnt" \
+  --cores 16 \
+  --keep-going \
+  --snakefile workflow/Snakefile \
+  --configfile config/config.yaml
+```
+
+Run post-processing only:
+
+```bash
+bash workflow/scripts/run_post_process.sh config/config.yaml
+```
+
+## Modularity and Customization
+
+The workflow is organized as modular Snakemake rules with configuration-driven paths, thresholds, resource settings, and container definitions. Users can adapt reference resources, filtering thresholds, execution settings, and downstream reporting behavior to their own validated assay requirements.
+
+To change common settings:
+
+- Edit `config/config.yaml` under `filter_thresholds` to modify DP and GQ cutoffs.
+- Edit `config/config.yaml` under `resources` to change Java memory and temporary-directory settings.
+- Edit `config/config.yaml` under `references` to change reference FASTA, known-sites VCF, BED file, pseudogene BED, and VEP cache paths.
+- Edit `config/config.yaml` under `containers` to change or pin alternative container images.
+
+To add or adjust tool-specific parameters:
+
+- Modify the relevant rule in `workflow/rules/` for alignment, calling, filtering, or annotation parameters.
+- Modify the relevant script in `workflow/scripts/` for post-processing and report-generation behavior.
+
+Examples:
+
+- To change the bcftools filtering thresholds, edit `workflow/rules/calling.smk`.
+- To change VEP flags or annotation fields, edit `workflow/rules/annotation.smk`.
+- To modify final report logic, edit `workflow/scripts/filter.py`, `workflow/scripts/run_filter.py`, or `workflow/scripts/True_positive_filter.py`.
+
+## Test Dataset and Reproducibility Data
+
+Representative Coriell reference FASTQ files used in this study are available at Zenodo:
+
+`https://zenodo.org/records/17802399`
+
+These data can be used as example validation inputs or as an installation-verification dataset after configuring the required reference resources.
+
+The Zenodo record includes the Coriell FASTQ subsets used in the study, including:
+
+- `Coriell_NA23721_S2_R1_001.fastq.gz`
+- `Coriell_NA23721_S2_R2_001.fastq.gz`
+- `PC10_Car_NA11629_6_S119_R1_001.fastq.gz`
+- `PC10_Car_NA11629_6_S119_R2_001.fastq.gz`
+- `PC11_Pul_NA12585_B14_S120_R1_001.fastq.gz`
+- `PC11_Pul_NA12585_B14_S120_R2_001.fastq.gz`
+- `PC2_Pul_NA16659_3_S12_R1_001.fastq.gz`
+- `PC2_Pul_NA16659_3_S12_R2_001.fastq.gz`
+- `PC3_CGX_NA03951_A1_S24_R1_001.fastq.gz`
+- `PC3_CGX_NA03951_A1_S24_R2_001.fastq.gz`
+- `PC4_Immuno_NA14639_C1_S132_R1_001.fastq.gz`
+- `PC4_Immuno_NA14639_C1_S132_R2_001.fastq.gz`
+- `PC_Immuno_NA21849_S60_R1_001.fastq.gz`
+- `PC_Immuno_NA21849_S60_R2_001.fastq.gz`
+
+For a minimal validation-style test, users may run the workflow on:
+
+- `Coriell_NA23721_S2_R1_001.fastq.gz`
+- `Coriell_NA23721_S2_R2_001.fastq.gz`
+
+and verify recovery of the expected `MPZ c.418T>A (p.Ser140Thr)` finding in the final report.
+
+## Outputs
+
+All outputs are written below `output_dir`, including:
+
+- `fastp/`
+- `alignment/`
+- `variants/`
+- `annotation/`
+- `compare/`
+- `logs/`
+- `reports/`
+
+Representative outputs include:
+
+- `alignment/<sample>_recal.bam`
+- `variants/<sample>_filtered.vcf.gz`
+- `annotation/<sample>_vep.vcf`
+- `annotation/<sample>_fb_vep.vcf`
+- `annotation/<sample>_merged_vep.vcf`
+- `reports/<sample>_raw_output.csv`
+- `reports/<sample>_output_p.csv`
+- `reports/*_tp.csv`
+- `reports/*_tp_report.csv`
+- `reports/coverage/`
+
+## Reproducibility
+
+Core workflow dependencies are pinned through rule-level container images declared in `config/config.yaml`. The workflow uses Docker-compatible image URIs, including BioContainers images for `fastp`, `bwa`, `samtools`, `GATK4`, `bcftools`, `FreeBayes`, and `Ensembl VEP`. Execution settings that vary by system, such as GATK memory and temporary-directory location, are configured through `config/config.yaml` rather than hard-coded paths.
+
+## Troubleshooting
+
+### Container bind issues
+
+If tools inside the container cannot see the reference, FASTQ, or cache paths, add bind mounts through `SINGULARITY_ARGS`.
+
+Example:
+
+```bash
+SINGULARITY_ARGS="--bind /home --bind /mnt" CORES=16 bash run.sh
+```
+
+### FASTQs not detected
+
+Check both:
+
+- the files are located under `input_dir`
+- the filenames follow `<sample>_R1_001.fastq.gz` and `<sample>_R2_001.fastq.gz`
+
+### VEP cache not found
+
+Confirm that:
+
+- `references.vep_cache` points to the cache directory
+- the cache path is visible inside the container via `SINGULARITY_ARGS`
+
+### Known-sites or reference path errors
+
+Confirm that:
+
+- `references.ref`, `references.bwa_index`, and `references.known_sites` are correct in `config/config.yaml`
+- those paths are bind-mounted if they are outside the project directory
+
+## Reference Build Note
+
+The workflow is currently evaluated in a GRCh37-based configuration because the assay context, CAP proficiency materials, Coriell reference benchmarking set, and downstream interpretation resources used in this study were aligned to GRCh37. Future GRCh38 support should be treated as a separately validated configuration.
+
+## License and Third-Party Components
+
+The repository code is released under the MIT License. Third-party tools, container images, and reference resources used by the workflow retain their own licenses and terms of use, and users are responsible for complying with those requirements.
+
