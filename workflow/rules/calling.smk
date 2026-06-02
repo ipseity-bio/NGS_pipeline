@@ -38,6 +38,7 @@ rule freebayes:
         mkdir -p {VARIANT_DIR} {LOG_DIR}
         freebayes \
             -f {REF} \
+            -t {BED_PATH} \
             --genotype-qualities \
             {input.bam} \
             > {output.vcf} 2> {log}
@@ -49,6 +50,17 @@ rule filter_strand_bias:
         vcf=str(VARIANT_DIR / "{sample}_variants.vcf")
     output:
         vcf=str(VARIANT_DIR / "{sample}_no_strand_bias.vcf")
+    params:
+        snp_qd_min=HARD_FILTERS["snps"]["QD_min"],
+        snp_fs_max=HARD_FILTERS["snps"]["FS_max"],
+        snp_sor_max=HARD_FILTERS["snps"]["SOR_max"],
+        snp_mq_min=HARD_FILTERS["snps"]["MQ_min"],
+        snp_mqranksum_min=HARD_FILTERS["snps"]["MQRankSum_min"],
+        snp_readpos_min=HARD_FILTERS["snps"]["ReadPosRankSum_min"],
+        indel_qd_min=HARD_FILTERS["indels"]["QD_min"],
+        indel_fs_max=HARD_FILTERS["indels"]["FS_max"],
+        indel_sor_max=HARD_FILTERS["indels"]["SOR_max"],
+        indel_readpos_min=HARD_FILTERS["indels"]["ReadPosRankSum_min"],
     log:
         str(LOG_DIR / "filter_strand_bias_{sample}.log")
     container:
@@ -57,9 +69,22 @@ rule filter_strand_bias:
         r"""
         mkdir -p {LOG_DIR}
         set -o pipefail
-        bcftools norm -f {REF} --check-ref w {input.vcf} 2>> {log} \
-        | bcftools norm -f {REF} -d none 2>> {log} \
-        | bcftools filter -i 'INFO/SOR > 0.5 & INFO/SOR < 2.0' -O v -o {output.vcf} - >> {log} 2>&1
+        bcftools norm -f {REF} --check-ref w -d none {input.vcf} 2>> {log} \
+        | bcftools filter -i '(
+            TYPE="snp" &&
+            (INFO/QD="." || INFO/QD >= {params.snp_qd_min}) &&
+            (INFO/FS="." || INFO/FS <= {params.snp_fs_max}) &&
+            (INFO/SOR="." || INFO/SOR <= {params.snp_sor_max}) &&
+            (INFO/MQ="." || INFO/MQ >= {params.snp_mq_min}) &&
+            (INFO/MQRankSum="." || INFO/MQRankSum >= {params.snp_mqranksum_min}) &&
+            (INFO/ReadPosRankSum="." || INFO/ReadPosRankSum >= {params.snp_readpos_min})
+          ) || (
+            TYPE!="snp" &&
+            (INFO/QD="." || INFO/QD >= {params.indel_qd_min}) &&
+            (INFO/FS="." || INFO/FS <= {params.indel_fs_max}) &&
+            (INFO/SOR="." || INFO/SOR <= {params.indel_sor_max}) &&
+            (INFO/ReadPosRankSum="." || INFO/ReadPosRankSum >= {params.indel_readpos_min})
+          )' -O v -o {output.vcf} - >> {log} 2>&1
         """
 
 
@@ -104,10 +129,11 @@ rule bcftools_filter_fb:
     shell:
         r"""
         mkdir -p {LOG_DIR}
-        bcftools norm -f {REF} --check-ref w {input.vcf} \
-        | bcftools norm -f {REF} -d none \
-        | bcftools filter -i '(FMT/DP >= {params.DP}) & (FMT/GQ >= {params.GQ}) & (GT!="0/0")' \
-        -Oz -o {output.vcf} - > {log} 2>&1
+        set -o pipefail
+        bcftools norm -f {REF} --check-ref w {input.vcf} 2>> {log} \
+        | bcftools norm -f {REF} -d none 2>> {log} \
+        | bcftools filter -i '(FMT/DP >= {params.DP}) & (FMT/GQ >= {params.GQ}) & (GT!="0/0")' 2>> {log} \
+        | bcftools sort -Oz -o {output.vcf} - >> {log} 2>&1
         bcftools index -f {output.vcf} >> {log} 2>&1
         """
 

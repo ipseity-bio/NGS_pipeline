@@ -35,19 +35,27 @@ The pipeline performs:
 - `Singularity` or `Apptainer` for rule-level container execution
 - `bash`
 - `python3`
+- `pandas`
+- `numpy`
+- `samtools`
+- `bcftools`
+- `bedtools`
 - `zip`
 
 The main analysis tools are executed through pinned container images defined in `config/config.yaml`. Host installation of `bwa`, `samtools`, `gatk`, `bcftools`, `freebayes`, or `vep` is not required for the core Snakemake workflow.
 
-### Host-side scripts
+### Host-side reporting dependencies
 
-The post-processing wrapper uses:
+The report-generation stage is now tracked by Snakemake, but the current release invokes the repository post-processing scripts directly from the host environment. For that stage, the host must provide:
 
 - `python3`
+- `pandas`
+- `numpy`
 - `bash`
+- `samtools`
+- `bcftools`
+- `bedtools`
 - `zip`
-
-No extra Python package installation is required for the wrapper in the current release.
 
 ## Scope
 
@@ -66,6 +74,8 @@ The current workflow does not support:
 - mitochondrial variant analysis
 - joint genotyping
 - trio-aware or population-scale calling
+
+Phenotype-related information in the current implementation is report-oriented. The workflow does not perform automated patient-phenotype matching or phenotype-driven ranking.
 
 ## Data Requirements
 
@@ -135,6 +145,8 @@ Main settings:
 - `references.pseudogene_bed`: pseudogene BED file
 - `filter_thresholds.DP`: depth threshold
 - `filter_thresholds.GQ`: genotype-quality threshold
+- `gatk_hard_filters.snps.*`: configurable SNP hard-filter thresholds
+- `gatk_hard_filters.indels.*`: configurable indel hard-filter thresholds
 - `resources.gatk_mem_mb`: Java memory for GATK rules
 - `resources.tmpdir`: temporary directory
 - `postprocess.variant_summary`: ClinVar variant summary file
@@ -187,12 +199,6 @@ snakemake \
   --configfile config/config.yaml
 ```
 
-Run post-processing only:
-
-```bash
-bash workflow/scripts/run_post_process.sh config/config.yaml
-```
-
 ## Modularity and Customization
 
 The workflow is organized as modular Snakemake rules with configuration-driven paths, thresholds, resource settings, and container definitions. Users can adapt reference resources, filtering thresholds, execution settings, and downstream reporting behavior to their own validated assay requirements.
@@ -200,6 +206,7 @@ The workflow is organized as modular Snakemake rules with configuration-driven p
 To change common settings:
 
 - Edit `config/config.yaml` under `filter_thresholds` to modify DP and GQ cutoffs.
+- Edit `config/config.yaml` under `gatk_hard_filters` to change GATK-style hard-filter thresholds for SNPs and indels, including `QD`, `FS`, `SOR`, `MQ`, `MQRankSum`, and `ReadPosRankSum` where applicable.
 - Edit `config/config.yaml` under `resources` to change Java memory and temporary-directory settings.
 - Edit `config/config.yaml` under `references` to change reference FASTA, known-sites VCF, BED file, pseudogene BED, and VEP cache paths.
 - Edit `config/config.yaml` under `containers` to change or pin alternative container images.
@@ -212,6 +219,7 @@ To add or adjust tool-specific parameters:
 Examples:
 
 - To change the bcftools filtering thresholds, edit `workflow/rules/calling.smk`.
+- To change the configured GATK-style SNP/indel hard filters without editing rule code, update `gatk_hard_filters` in `config/config.yaml`.
 - To change VEP flags or annotation fields, edit `workflow/rules/annotation.smk`.
 - To modify final report logic, edit `workflow/scripts/filter.py`, `workflow/scripts/run_filter.py`, or `workflow/scripts/True_positive_filter.py`.
 
@@ -222,23 +230,6 @@ Representative Coriell reference FASTQ files used in this study are available at
 `https://zenodo.org/records/17802399`
 
 These data can be used as example validation inputs or as an installation-verification dataset after configuring the required reference resources.
-
-The Zenodo record includes the Coriell FASTQ subsets used in the study, including:
-
-- `Coriell_NA23721_S2_R1_001.fastq.gz`
-- `Coriell_NA23721_S2_R2_001.fastq.gz`
-- `PC10_Car_NA11629_6_S119_R1_001.fastq.gz`
-- `PC10_Car_NA11629_6_S119_R2_001.fastq.gz`
-- `PC11_Pul_NA12585_B14_S120_R1_001.fastq.gz`
-- `PC11_Pul_NA12585_B14_S120_R2_001.fastq.gz`
-- `PC2_Pul_NA16659_3_S12_R1_001.fastq.gz`
-- `PC2_Pul_NA16659_3_S12_R2_001.fastq.gz`
-- `PC3_CGX_NA03951_A1_S24_R1_001.fastq.gz`
-- `PC3_CGX_NA03951_A1_S24_R2_001.fastq.gz`
-- `PC4_Immuno_NA14639_C1_S132_R1_001.fastq.gz`
-- `PC4_Immuno_NA14639_C1_S132_R2_001.fastq.gz`
-- `PC_Immuno_NA21849_S60_R1_001.fastq.gz`
-- `PC_Immuno_NA21849_S60_R2_001.fastq.gz`
 
 For a minimal validation-style test, users may run the workflow on:
 
@@ -266,11 +257,13 @@ Representative outputs include:
 - `annotation/<sample>_vep.vcf`
 - `annotation/<sample>_fb_vep.vcf`
 - `annotation/<sample>_merged_vep.vcf`
+- `reports/<sample>_all_candidates.csv`
 - `reports/<sample>_raw_output.csv`
 - `reports/<sample>_output_p.csv`
 - `reports/*_tp.csv`
 - `reports/*_tp_report.csv`
 - `reports/coverage/`
+- `reports/.postprocess.done`
 
 ## Reproducibility
 
@@ -309,11 +302,6 @@ Confirm that:
 - `references.ref`, `references.bwa_index`, and `references.known_sites` are correct in `config/config.yaml`
 - those paths are bind-mounted if they are outside the project directory
 
-## Reference Build Note
-
-The workflow is currently evaluated in a GRCh37-based configuration because the assay context, CAP proficiency materials, Coriell reference benchmarking set, and downstream interpretation resources used in this study were aligned to GRCh37. Future GRCh38 support should be treated as a separately validated configuration.
-
 ## License and Third-Party Components
 
 The repository code is released under the MIT License. Third-party tools, container images, and reference resources used by the workflow retain their own licenses and terms of use, and users are responsible for complying with those requirements.
-

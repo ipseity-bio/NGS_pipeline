@@ -31,5 +31,3 @@ if [[ -n "$singularity_args" ]]; then
 fi
 
 snakemake "${snakemake_args[@]}"
-
-bash workflow/scripts/run_post_process.sh "$config_path"

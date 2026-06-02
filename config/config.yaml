@@ -13,6 +13,20 @@ filter_thresholds:
   DP: 30
   GQ: 99
 
+gatk_hard_filters:
+  snps:
+    QD_min: 2.0
+    FS_max: 60.0
+    SOR_max: 3.0
+    MQ_min: 40.0
+    MQRankSum_min: -12.5
+    ReadPosRankSum_min: -8.0
+  indels:
+    QD_min: 2.0
+    FS_max: 200.0
+    SOR_max: 10.0
+    ReadPosRankSum_min: -20.0
+
 resources:
   gatk_mem_mb: 32000
   tmpdir: "/tmp"

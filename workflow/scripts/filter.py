@@ -103,6 +103,169 @@ def read_vep_tab(path: str) -> pd.DataFrame:
     return pd.DataFrame(normalized_rows, columns=header_cols, dtype=str)
 
 
+def first_non_null(series: pd.Series):
+    series = series.dropna()
+    series = series[series.astype(str).str.strip() != ""]
+    if not series.empty:
+        return series.iloc[0]
+    return np.nan
+
+
+def fill_with_anchor_fallback(
+    left_df: pd.DataFrame,
+    lookup_df: pd.DataFrame,
+    left_on_start,
+    left_on_anchor,
+    right_on,
+    value_columns,
+) -> pd.DataFrame:
+    out = left_df.merge(lookup_df, left_on=left_on_start, right_on=right_on, how="left")
+    missing = out[value_columns[0]].isna()
+    if missing.any():
+        fallback = left_df.loc[missing].copy()
+        fallback["_row_id"] = fallback.index
+        fallback_merge = fallback.merge(
+            lookup_df, left_on=left_on_anchor, right_on=right_on, how="left"
+        )
+        fallback_merge = fallback_merge.drop_duplicates(subset="_row_id", keep="first")
+        fallback_merge = fallback_merge.set_index("_row_id")
+        target_index = out.index[missing]
+        aligned = fallback_merge.reindex(target_index)
+        out.loc[target_index, value_columns] = aligned[value_columns].to_numpy()
+    return out
+
+
+def attach_sample_metrics(
+    df: pd.DataFrame, partner_path: str, freebayes_path: str
+) -> pd.DataFrame:
+    with open(partner_path, "r", encoding="utf-8", errors="replace") as handle:
+        lines_1 = [line for line in handle if not line.startswith("##")]
+
+    haplocall = pd.read_csv(
+        io.StringIO("".join(lines_1)), dtype=str, sep="\t"
+    ).rename(columns={"#CHROM": "CHROM"})
+
+    sample_col = haplocall.columns[-1]
+    df = add_pos_candidates(df, location_col="Location")
+    haplocall["POS"] = pd.to_numeric(haplocall["POS"], errors="coerce")
+
+    out = fill_with_anchor_fallback(
+        left_df=df,
+        lookup_df=haplocall,
+        left_on_start="POS_START",
+        left_on_anchor="POS_ANCHOR",
+        right_on="POS",
+        value_columns=list(haplocall.columns),
+    )
+
+    out["Genotype (GT)"] = out[sample_col].str.split(":").str[0]
+    out["Depth of Coverage (DP)"] = out[sample_col].str.split(":").str[2]
+    out["Genotype Quality (GQ)"] = out[sample_col].str.split(":").str[3]
+    out["AD_ALT"] = out[sample_col].str.split(":").str[1].str.split(",").str[1]
+    out["AD_ALT"] = pd.to_numeric(out["AD_ALT"], errors="coerce")
+    out["Depth of Coverage (DP)"] = pd.to_numeric(
+        out["Depth of Coverage (DP)"], errors="coerce"
+    )
+    out["VAF (Sample)"] = out["AD_ALT"] / out["Depth of Coverage (DP)"]
+
+    if os.path.exists(freebayes_path):
+        fb_full = load_freebayes_full(freebayes_path)
+        out["CHROM"] = out["Location"].astype(str).str.split(r"[:|-]").str[0]
+        out = add_pos_candidates(out, location_col="Location")
+
+        out = fill_with_anchor_fallback(
+            left_df=out,
+            lookup_df=fb_full,
+            left_on_start=["CHROM", "POS_START"],
+            left_on_anchor=["CHROM", "POS_ANCHOR"],
+            right_on=["CHROM", "POS"],
+            value_columns=list(fb_full.columns),
+        )
+
+        def pick_alt_idx(allele, alt_list):
+            if not isinstance(alt_list, list) or not alt_list:
+                return np.nan
+            allele = str(allele)
+            for i, alt in enumerate(alt_list):
+                if allele == alt:
+                    return i + 1
+            for i, alt in enumerate(alt_list):
+                if allele in alt or alt in allele:
+                    return i + 1
+            return int(np.argmin([abs(len(alt) - len(allele)) for alt in alt_list])) + 1
+
+        out["ALT_IDX"] = out.apply(
+            lambda row: pick_alt_idx(row["Allele"], row["ALT_LIST"]), axis=1
+        )
+        out["AD_ALT_fb"] = out.apply(
+            lambda row: row["AD_LIST"][int(row["ALT_IDX"])]
+            if isinstance(row["AD_LIST"], list)
+            and pd.notna(row["ALT_IDX"])
+            and int(row["ALT_IDX"]) < len(row["AD_LIST"])
+            else np.nan,
+            axis=1,
+        )
+        out["VAF_fb"] = pd.to_numeric(
+            out["AD_ALT_fb"], errors="coerce"
+        ) / pd.to_numeric(out["DP_fb"], errors="coerce")
+
+        out["Genotype (GT)"] = out["Genotype (GT)"].where(
+            out["Genotype (GT)"].notna() & (out["Genotype (GT)"] != ""), out["GT_fb"]
+        )
+        out["Depth of Coverage (DP)"] = out["Depth of Coverage (DP)"].where(
+            out["Depth of Coverage (DP)"].notna(),
+            pd.to_numeric(out["DP_fb"], errors="coerce"),
+        )
+        out["Genotype Quality (GQ)"] = out["Genotype Quality (GQ)"].where(
+            out["Genotype Quality (GQ)"].notna(),
+            pd.to_numeric(out["GQ_fb"], errors="coerce"),
+        )
+        out["VAF (Sample)"] = out["VAF (Sample)"].where(
+            out["VAF (Sample)"].notna(), out["VAF_fb"]
+        )
+
+    return out
+
+
+def build_output_table(df: pd.DataFrame) -> pd.DataFrame:
+    out = df[
+        [
+            "Location",
+            "REF_ALLELE",
+            "Allele",
+            "BIOTYPE",
+            "Existing_variation",
+            "SYMBOL",
+            "GeneSymbol",
+            "CLIN_SIG",
+            "ClinicalSignificance",
+            "SPDI",
+            "HGVSg",
+            "HGVSc",
+            "HGVSp",
+            "HGVS_OFFSET",
+            "SIFT",
+            "PolyPhen",
+            "VAF (Sample)",
+            "MAX_AF",
+            "Genotype (GT)",
+            "ZYG",
+            "Depth of Coverage (DP)",
+            "Genotype Quality (GQ)",
+            "PhenotypeIDS",
+            "PhenotypeList",
+        ]
+    ].drop_duplicates().reset_index(drop=True)
+
+    out = out.rename(
+        columns={
+            "ClinicalSignificance": "ClinicalSignificance (ClinVar)",
+            "MAX_AF": "MAX_AF (Population)",
+        }
+    )
+    return out
+
+
 def process_vcf(
     file_pattern: str,
     variant_summary_path: str,
@@ -112,18 +275,73 @@ def process_vcf(
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
     files = sorted(glob.glob(file_pattern))
-    clinvar = pd.read_csv(variant_summary_path, sep="\t")
+    clinvar = pd.read_csv(variant_summary_path, sep="\t", low_memory=False)
 
     for file in files:
         vcf = read_vep_tab(file)
         if "#CHROM" in vcf.columns:
             vcf = vcf.rename(columns={"#CHROM": "CHROM"})
 
-        vcf["Existing_variation"] = vcf["Existing_variation"].str.split(",")
-        vcf = vcf.explode("Existing_variation").dropna(subset=["Existing_variation"])
-        vcf["Existing_variation"] = vcf["Existing_variation"].astype(str)
+        variant_key = [
+            col
+            for col in [
+                "Location",
+                "REF_ALLELE",
+                "Allele",
+                "BIOTYPE",
+                "SYMBOL",
+                "SPDI",
+                "HGVSg",
+                "HGVSc",
+                "HGVSp",
+                "HGVS_OFFSET",
+                "SIFT",
+                "PolyPhen",
+                "MAX_AF",
+                "ZYG",
+                "CLIN_SIG",
+            ]
+            if col in vcf.columns
+        ]
 
-        x = vcf[vcf["Existing_variation"].str.startswith("rs")].copy()
+        vcf_lookup = vcf.copy()
+        vcf_lookup["Existing_variation"] = vcf_lookup["Existing_variation"].fillna("").astype(str)
+        vcf_lookup["Existing_variation"] = vcf_lookup["Existing_variation"].str.split(",")
+        vcf_lookup = vcf_lookup.explode("Existing_variation")
+        vcf_lookup["Existing_variation"] = vcf_lookup["Existing_variation"].fillna("").astype(str).str.strip()
+        vcf_lookup["rs_id"] = pd.to_numeric(
+            vcf_lookup["Existing_variation"].str.extract(r"^rs(\d+)$")[0],
+            errors="coerce",
+            downcast="integer",
+        )
+
+        clinvar_left = pd.merge(
+            vcf_lookup,
+            clinvar,
+            left_on="rs_id",
+            right_on="RS# (dbSNP)",
+            how="left",
+        )
+        clinvar_left = clinvar_left[
+            clinvar_left["Assembly"].isna()
+            | clinvar_left["Assembly"].astype(str).str.startswith("GRCh37")
+        ]
+
+        all_candidates = clinvar_left.groupby(variant_key, dropna=False, as_index=False).agg(
+            {
+                "Existing_variation": first_non_null,
+                "GeneSymbol": first_non_null,
+                "ClinicalSignificance": first_non_null,
+                "PhenotypeIDS": first_non_null,
+                "PhenotypeList": first_non_null,
+                "rs_id": first_non_null,
+            }
+        )
+        all_candidates["GeneSymbol"] = all_candidates["GeneSymbol"].fillna(
+            all_candidates.get("SYMBOL")
+        )
+
+        x = vcf_lookup[vcf_lookup["Existing_variation"].str.startswith("rs")].copy()
         x["rs_id"] = pd.to_numeric(
             x["Existing_variation"].str.replace("rs", "", regex=False),
             errors="coerce",
@@ -157,140 +375,12 @@ def process_vcf(
         partner_path = os.path.join(haplotype_dir, f"{sample}_variants.vcf")
         freebayes_path = os.path.join(freebayes_dir, f"{sample}_freebayes.vcf")
 
-        with open(partner_path, "r", encoding="utf-8", errors="replace") as handle:
-            lines_1 = [line for line in handle if not line.startswith("##")]
+        all_candidates = attach_sample_metrics(all_candidates, partner_path, freebayes_path)
+        all_out = build_output_table(all_candidates)
+        all_out.to_csv(os.path.join(output_dir, f"{sample}_all_candidates.csv"), index=False)
 
-        haplocall = pd.read_csv(
-            io.StringIO("".join(lines_1)), dtype=str, sep="\t"
-        ).rename(columns={"#CHROM": "CHROM"})
-
-        sample_col = haplocall.columns[-1]
-        final = add_pos_candidates(final, location_col="Location")
-        haplocall["POS"] = pd.to_numeric(haplocall["POS"], errors="coerce")
-
-        m1 = final.merge(haplocall, left_on="POS_START", right_on="POS", how="left")
-        need2 = m1[sample_col].isna()
-        m2 = final.loc[need2].merge(haplocall, left_on="POS_ANCHOR", right_on="POS", how="left")
-        m1.loc[need2, haplocall.columns] = m2[haplocall.columns].values
-        dp_gq_zygo = m1
-
-        dp_gq_zygo["Genotype (GT)"] = dp_gq_zygo[sample_col].str.split(":").str[0]
-        dp_gq_zygo["Depth of Coverage (DP)"] = dp_gq_zygo[sample_col].str.split(":").str[2]
-        dp_gq_zygo["Genotype Quality (GQ)"] = dp_gq_zygo[sample_col].str.split(":").str[3]
-        dp_gq_zygo["AD_ALT"] = dp_gq_zygo[sample_col].str.split(":").str[1].str.split(",").str[1]
-        dp_gq_zygo["AD_ALT"] = pd.to_numeric(dp_gq_zygo["AD_ALT"], errors="coerce")
-        dp_gq_zygo["Depth of Coverage (DP)"] = pd.to_numeric(
-            dp_gq_zygo["Depth of Coverage (DP)"], errors="coerce"
-        )
-        dp_gq_zygo["VAF (Sample)"] = (
-            dp_gq_zygo["AD_ALT"] / dp_gq_zygo["Depth of Coverage (DP)"]
-        )
-
-        if os.path.exists(freebayes_path):
-            fb_full = load_freebayes_full(freebayes_path)
-            dp_gq_zygo["CHROM"] = (
-                dp_gq_zygo["Location"].astype(str).str.split(r"[:|-]").str[0]
-            )
-            dp_gq_zygo = add_pos_candidates(dp_gq_zygo, location_col="Location")
-
-            m1 = dp_gq_zygo.merge(
-                fb_full,
-                left_on=["CHROM", "POS_START"],
-                right_on=["CHROM", "POS"],
-                how="left",
-                suffixes=("", "_fb"),
-            )
-            need2 = m1["GT_fb"].isna()
-            m2 = m1.loc[need2].drop(columns=fb_full.columns.difference(["CHROM"]))
-            m2 = m2.merge(
-                fb_full,
-                left_on=["CHROM", "POS_ANCHOR"],
-                right_on=["CHROM", "POS"],
-                how="left",
-                suffixes=("", "_fb"),
-            )
-            m1.loc[need2, fb_full.columns] = m2[fb_full.columns].values
-            dp_gq_zygo = m1
-
-            def pick_alt_idx(allele, alt_list):
-                if not isinstance(alt_list, list) or not alt_list:
-                    return np.nan
-                allele = str(allele)
-                for i, alt in enumerate(alt_list):
-                    if allele == alt:
-                        return i + 1
-                for i, alt in enumerate(alt_list):
-                    if allele in alt or alt in allele:
-                        return i + 1
-                return int(np.argmin([abs(len(alt) - len(allele)) for alt in alt_list])) + 1
-
-            dp_gq_zygo["ALT_IDX"] = dp_gq_zygo.apply(
-                lambda row: pick_alt_idx(row["Allele"], row["ALT_LIST"]), axis=1
-            )
-            dp_gq_zygo["AD_ALT_fb"] = dp_gq_zygo.apply(
-                lambda row: row["AD_LIST"][int(row["ALT_IDX"])]
-                if isinstance(row["AD_LIST"], list)
-                and pd.notna(row["ALT_IDX"])
-                and int(row["ALT_IDX"]) < len(row["AD_LIST"])
-                else np.nan,
-                axis=1,
-            )
-            dp_gq_zygo["VAF_fb"] = pd.to_numeric(
-                dp_gq_zygo["AD_ALT_fb"], errors="coerce"
-            ) / pd.to_numeric(dp_gq_zygo["DP_fb"], errors="coerce")
-
-            dp_gq_zygo["Genotype (GT)"] = dp_gq_zygo["Genotype (GT)"].where(
-                dp_gq_zygo["Genotype (GT)"].notna()
-                & (dp_gq_zygo["Genotype (GT)"] != ""),
-                dp_gq_zygo["GT_fb"],
-            )
-            dp_gq_zygo["Depth of Coverage (DP)"] = dp_gq_zygo["Depth of Coverage (DP)"].where(
-                dp_gq_zygo["Depth of Coverage (DP)"].notna(),
-                pd.to_numeric(dp_gq_zygo["DP_fb"], errors="coerce"),
-            )
-            dp_gq_zygo["Genotype Quality (GQ)"] = dp_gq_zygo["Genotype Quality (GQ)"].where(
-                dp_gq_zygo["Genotype Quality (GQ)"].notna(),
-                pd.to_numeric(dp_gq_zygo["GQ_fb"], errors="coerce"),
-            )
-            dp_gq_zygo["VAF (Sample)"] = dp_gq_zygo["VAF (Sample)"].where(
-                dp_gq_zygo["VAF (Sample)"].notna(), dp_gq_zygo["VAF_fb"]
-            )
-
-        out = dp_gq_zygo[
-            [
-                "Location",
-                "REF_ALLELE",
-                "Allele",
-                "BIOTYPE",
-                "Existing_variation",
-                "SYMBOL",
-                "GeneSymbol",
-                "CLIN_SIG",
-                "ClinicalSignificance",
-                "SPDI",
-                "HGVSg",
-                "HGVSc",
-                "HGVSp",
-                "HGVS_OFFSET",
-                "SIFT",
-                "PolyPhen",
-                "VAF (Sample)",
-                "MAX_AF",
-                "Genotype (GT)",
-                "ZYG",
-                "Depth of Coverage (DP)",
-                "Genotype Quality (GQ)",
-                "PhenotypeIDS",
-                "PhenotypeList",
-            ]
-        ].drop_duplicates().reset_index(drop=True)
-
-        out = out.rename(
-            columns={
-                "ClinicalSignificance": "ClinicalSignificance (ClinVar)",
-                "MAX_AF": "MAX_AF (Population)",
-            }
-        )
+        dp_gq_zygo = attach_sample_metrics(final, partner_path, freebayes_path)
+        out = build_output_table(dp_gq_zygo)
 
         out.to_csv(os.path.join(output_dir, f"{sample}_raw_output.csv"), index=False)
 

@@ -7,8 +7,10 @@ OUTPUT_DIR = Path(config["output_dir"]).resolve()
 
 REFERENCES = config["references"]
 FILTERS = config["filter_thresholds"]
+HARD_FILTERS = config["gatk_hard_filters"]
 RESOURCES = config["resources"]
 CONTAINERS = config["containers"]
+POSTPROCESS = config["postprocess"]
 
 REF = Path(REFERENCES["ref"]).resolve()
 BWA_INDEX = Path(REFERENCES["bwa_index"]).resolve()
@@ -35,6 +37,10 @@ ALIGN_DIR = OUTPUT_DIR / "alignment"
 VARIANT_DIR = OUTPUT_DIR / "variants"
 ANNOTATION_DIR = OUTPUT_DIR / "annotation"
 COMPARE_DIR = OUTPUT_DIR / "compare"
+REPORT_DIR = OUTPUT_DIR / POSTPROCESS["report_dir"]
+COVERAGE_DIR = OUTPUT_DIR / POSTPROCESS["coverage_dir"]
+PSEUDOGENE_DIR = REPORT_DIR / "pseudogene"
+COVERAGE_SUMMARY = REPORT_DIR / f"{OUTPUT_DIR.name}_coverage_summary.csv"
 
 
 def input_fastq(sample, read):
@@ -44,9 +50,19 @@ def input_fastq(sample, read):
 
 rule all:
     input:
-        expand(str(ANNOTATION_DIR / "{sample}_merged_vep.vcf"), sample=sample_names)
+        expand(str(REPORT_DIR / "{sample}_all_candidates.csv"), sample=sample_names),
+        expand(str(REPORT_DIR / "{sample}_raw_output.csv"), sample=sample_names),
+        expand(str(REPORT_DIR / "{sample}_output_p.csv"), sample=sample_names),
+        expand(str(REPORT_DIR / "{sample}_raw_output_filtered_tp.csv"), sample=sample_names),
+        expand(str(REPORT_DIR / "{sample}_raw_output_filtered_tp_report.csv"), sample=sample_names),
+        expand(str(PSEUDOGENE_DIR / "{sample}_filtered_pseudogene_variants.txt"), sample=sample_names),
+        str(COVERAGE_SUMMARY),
+        str(REPORT_DIR / "true_positive.zip"),
+        str(REPORT_DIR / "true_positive_report.zip"),
+        str(REPORT_DIR / ".postprocess.done")
 
 
 include: "rules/preprocess.smk"
 include: "rules/calling.smk"
 include: "rules/annotation.smk"
+include: "rules/postprocess.smk"
