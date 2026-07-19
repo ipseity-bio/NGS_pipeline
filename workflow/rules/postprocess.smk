@@ -22,6 +22,8 @@ rule postprocess_reports:
     log:
         str(LOG_DIR / "postprocess.log")
     threads: 1
+    container:
+        CONTAINERS["postprocess"]
     shell:
         """
         mkdir -p {REPORT_DIR} {PSEUDOGENE_DIR} {LOG_DIR}

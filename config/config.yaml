@@ -13,6 +13,9 @@ filter_thresholds:
   DP: 30
   GQ: 99
 
+reporting:
+  require_protein_coding_for_rare_high_impact: true
+
 gatk_hard_filters:
   snps:
     QD_min: 2.0
@@ -40,6 +43,7 @@ containers:
   freebayes: "docker://quay.io/biocontainers/freebayes:1.3.10--hbefcdb2_0"
   vep: "docker://quay.io/biocontainers/ensembl-vep:115.2--pl5321h2a3209d_1"
   python: "docker://python:3.11-slim"
+  postprocess: "docker://ghcr.io/viswajitmulpuru/ipseity-ngs-postprocess:1.0.1"
 
 postprocess:
   variant_summary: "./variant_summary.txt"

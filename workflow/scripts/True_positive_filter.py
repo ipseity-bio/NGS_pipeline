@@ -54,12 +54,20 @@ def main() -> None:
         data["Transcript"] = data["HGVSc"].str.extract(r"^(NM_\d+\.\d+)")
         data["Variant"] = data["HGVSc"].str.extract(r"(c\.\S+)")[0] + data["HGVSp"].str.extract(r"(p\.\S+)")[0].radd(" ; ").fillna("")
         data["Inheritance"] = data["ZYG"]
+        data["PhenotypeList"] = data["PhenotypeList"].fillna("").astype(str)
         data["Phenotype"] = data["PhenotypeList"].str.split("|").apply(
             lambda values: next((p for p in values if p not in ["not provided", "not specified"]), None)
             if isinstance(values, list)
             else None
         )
+        if "ReportCategory" not in data.columns:
+            data["ReportCategory"] = "candidate"
+        data["ReportCategory"] = data["ReportCategory"].fillna("candidate")
+        data["CLIN_SIG"] = data["CLIN_SIG"].fillna("-")
+        data["ClinicalSignificance (ClinVar)"] = data["ClinicalSignificance (ClinVar)"].fillna("-")
         data["Classification"] = "(" + data["CLIN_SIG"] + " ; " + data["ClinicalSignificance (ClinVar)"] + ")"
+        high_impact_label = data["ReportCategory"].eq("rare_high_impact_candidate")
+        data.loc[high_impact_label, "Classification"] = "Rare high-impact candidate"
         data["Allele State"] = data["ZYG"]
         data["Allelic Read Depths"] = (
             "Ref(" + data["REF_ALLELE"] + "), Alt(" + data["Allele"] + ") VAF:" + (data["VAF (Sample)"] * 100).astype(str) + "%"
@@ -71,22 +79,27 @@ def main() -> None:
             else f"{value * 100}% Max frequency observed in Annotated 1000 genomes/ESP/gnomAD."
         )
 
-        filtered_data = data[
-            (
-                (
-                    data["CLIN_SIG"].isin(["pathogenic", "pathogenic/likely_pathogenic"])
-                    | data["ClinicalSignificance (ClinVar)"].isin(["Pathogenic", "Pathogenic/Likely pathogenic"])
-                )
-                & (
-                    data["MAX_AF (Population)"].isna()
-                    | (data["MAX_AF (Population)"] == 0.001)
-                    | (data["MAX_AF (Population)"] < 0.015)
-                )
-            )
-        ]
+        rare_or_absent = (
+            data["MAX_AF (Population)"].isna()
+            | (data["MAX_AF (Population)"] <= 0.001)
+        )
+        clinvar_reportable = (
+            data["CLIN_SIG"].isin(["pathogenic", "pathogenic/likely_pathogenic"])
+            | data["ClinicalSignificance (ClinVar)"].isin(["Pathogenic", "Pathogenic/Likely pathogenic"])
+            | data["ReportCategory"].eq("clinvar_pathogenic")
+        )
+        high_impact_reportable = data["ReportCategory"].eq("rare_high_impact_candidate")
+        filtered_data = data[(clinvar_reportable | high_impact_reportable) & rare_or_absent].copy()
+        if "CANONICAL" not in filtered_data.columns:
+            filtered_data["CANONICAL"] = ""
+        filtered_data["_canonical_rank"] = (
+            filtered_data["CANONICAL"].fillna("").astype(str).str.upper().eq("YES")
+        ).astype(int)
+        filtered_data = filtered_data.sort_values("_canonical_rank", ascending=False)
 
         report_out = filtered_data[
             [
+                "_canonical_rank",
                 "Avg Read Depth",
                 "Gene",
                 "Transcript",
@@ -94,6 +107,8 @@ def main() -> None:
                 "Inheritance",
                 "Phenotype",
                 "Classification",
+                "Consequence",
+                "IMPACT",
                 "Location",
                 "Allele State",
                 "Allelic Read Depths",
@@ -112,12 +127,15 @@ def main() -> None:
         ].values[0]
         report_out["Panel Coverage"] = f"{value_p30}%"
         report_out = report_out[["Panel Coverage"] + [col for col in report_out.columns if col != "Panel Coverage"]]
-        report_out = report_out.drop_duplicates(subset=["Gene", "Variant", "Variant Frequency", "Phenotype"])
+        tp_dedup_subset = ["REF_ALLELE", "Allele", "HGVSg"]
+        report_dedup_subset = ["Allele State", "Allelic Read Depths", "Genomic Position"]
 
-        filtered_data.to_csv(output_file, index=False)
-        report_out.drop_duplicates(subset=["Gene", "Transcript", "Variant"]).to_csv(
-            report_output_file, index=False
-        )
+        filtered_data.drop_duplicates(subset=tp_dedup_subset).drop(
+            columns=["_canonical_rank"], errors="ignore"
+        ).to_csv(output_file, index=False)
+        report_out.drop_duplicates(subset=report_dedup_subset).drop(
+            columns=["_canonical_rank"], errors="ignore"
+        ).to_csv(report_output_file, index=False)
 
 
 if __name__ == "__main__":

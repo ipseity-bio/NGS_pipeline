@@ -69,7 +69,8 @@ rule filter_strand_bias:
         r"""
         mkdir -p {LOG_DIR}
         set -o pipefail
-        bcftools norm -f {REF} --check-ref w -d none {input.vcf} 2>> {log} \
+        bcftools norm -f {REF} --check-ref w {input.vcf} 2>> {log} \
+        | bcftools norm -f {REF} -d none 2>> {log} \
         | bcftools filter -i '(
             TYPE="snp" &&
             (INFO/QD="." || INFO/QD >= {params.snp_qd_min}) &&

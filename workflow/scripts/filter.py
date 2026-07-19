@@ -111,6 +111,78 @@ def first_non_null(series: pd.Series):
     return np.nan
 
 
+PATHOGENIC_CLIN_SIG = {
+    "pathogenic",
+    "pathogenic/established_risk_allele",
+    "likely_pathogenic",
+    "pathogenic/likely_pathogenic",
+}
+
+HIGH_IMPACT_CONSEQUENCES = {
+    "transcript_ablation",
+    "splice_acceptor_variant",
+    "splice_donor_variant",
+    "stop_gained",
+    "frameshift_variant",
+    "stop_lost",
+    "start_lost",
+    "transcript_amplification",
+    "feature_elongation",
+    "feature_truncation",
+}
+
+
+def is_pathogenic_clinvar(df: pd.DataFrame) -> pd.Series:
+    clin_sig = df.get("CLIN_SIG", pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
+    clinical = df.get("ClinicalSignificance", pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
+    return clin_sig.isin(PATHOGENIC_CLIN_SIG) | clinical.isin(
+        {"pathogenic", "pathogenic/likely pathogenic", "likely pathogenic"}
+    )
+
+
+def is_rare_high_impact_candidate(
+    df: pd.DataFrame, require_protein_coding: bool = True
+) -> pd.Series:
+    impact = df.get("IMPACT", pd.Series("", index=df.index)).fillna("").astype(str).str.upper()
+    consequence = df.get("Consequence", pd.Series("", index=df.index)).fillna("").astype(str)
+    has_high_impact = impact.apply(lambda value: "HIGH" in re.split(r"[,&]", value))
+    has_high_consequence = consequence.apply(
+        lambda value: any(term in HIGH_IMPACT_CONSEQUENCES for term in re.split(r"[,&]", value))
+    )
+    max_af = pd.to_numeric(df.get("MAX_AF", pd.Series(np.nan, index=df.index)), errors="coerce")
+    biotype = df.get("BIOTYPE", pd.Series("", index=df.index)).fillna("").astype(str)
+    rare = max_af.isna() | (max_af <= 0.001)
+    if require_protein_coding:
+        biotype_ok = biotype.eq("protein_coding") | biotype.eq("")
+    else:
+        biotype_ok = pd.Series(True, index=df.index)
+    return rare & biotype_ok & (has_high_impact | has_high_consequence)
+
+
+def add_report_category(
+    df: pd.DataFrame, require_protein_coding_for_rare_high_impact: bool = True
+) -> pd.DataFrame:
+    out = df.copy()
+    pathogenic = is_pathogenic_clinvar(out)
+    high_impact = is_rare_high_impact_candidate(
+        out, require_protein_coding=require_protein_coding_for_rare_high_impact
+    )
+    out["ReportCategory"] = np.select(
+        [pathogenic, high_impact],
+        ["clinvar_pathogenic", "rare_high_impact_candidate"],
+        default="candidate",
+    )
+    return out
+
+
+def fill_missing_columns(df: pd.DataFrame, columns) -> pd.DataFrame:
+    out = df.copy()
+    for col in columns:
+        if col not in out.columns:
+            out[col] = np.nan
+    return out
+
+
 def fill_with_anchor_fallback(
     left_df: pd.DataFrame,
     lookup_df: pd.DataFrame,
@@ -228,34 +300,39 @@ def attach_sample_metrics(
 
 
 def build_output_table(df: pd.DataFrame) -> pd.DataFrame:
-    out = df[
-        [
-            "Location",
-            "REF_ALLELE",
-            "Allele",
-            "BIOTYPE",
-            "Existing_variation",
-            "SYMBOL",
-            "GeneSymbol",
-            "CLIN_SIG",
-            "ClinicalSignificance",
-            "SPDI",
-            "HGVSg",
-            "HGVSc",
-            "HGVSp",
-            "HGVS_OFFSET",
-            "SIFT",
-            "PolyPhen",
-            "VAF (Sample)",
-            "MAX_AF",
-            "Genotype (GT)",
-            "ZYG",
-            "Depth of Coverage (DP)",
-            "Genotype Quality (GQ)",
-            "PhenotypeIDS",
-            "PhenotypeList",
-        ]
-    ].drop_duplicates().reset_index(drop=True)
+    columns = [
+        "Location",
+        "REF_ALLELE",
+        "Allele",
+        "Feature",
+        "Feature_type",
+        "Consequence",
+        "IMPACT",
+        "CANONICAL",
+        "BIOTYPE",
+        "Existing_variation",
+        "SYMBOL",
+        "GeneSymbol",
+        "CLIN_SIG",
+        "ClinicalSignificance",
+        "ReportCategory",
+        "SPDI",
+        "HGVSg",
+        "HGVSc",
+        "HGVSp",
+        "HGVS_OFFSET",
+        "SIFT",
+        "PolyPhen",
+        "VAF (Sample)",
+        "MAX_AF",
+        "Genotype (GT)",
+        "ZYG",
+        "Depth of Coverage (DP)",
+        "Genotype Quality (GQ)",
+        "PhenotypeIDS",
+        "PhenotypeList",
+    ]
+    out = fill_missing_columns(df, columns)[columns].drop_duplicates().reset_index(drop=True)
 
     out = out.rename(
         columns={
@@ -272,6 +349,7 @@ def process_vcf(
     output_dir: str,
     haplotype_dir: str,
     freebayes_dir: str,
+    require_protein_coding_for_rare_high_impact: bool = True,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
     files = sorted(glob.glob(file_pattern))
@@ -288,6 +366,11 @@ def process_vcf(
                 "Location",
                 "REF_ALLELE",
                 "Allele",
+                "Feature",
+                "Feature_type",
+                "Consequence",
+                "IMPACT",
+                "CANONICAL",
                 "BIOTYPE",
                 "SYMBOL",
                 "SPDI",
@@ -322,14 +405,29 @@ def process_vcf(
             right_on="RS# (dbSNP)",
             how="left",
         )
-        clinvar_left = clinvar_left[
-            clinvar_left["Assembly"].isna()
-            | clinvar_left["Assembly"].astype(str).str.startswith("GRCh37")
+        non_grch37 = (
+            clinvar_left["Assembly"].notna()
+            & ~clinvar_left["Assembly"].astype(str).str.startswith("GRCh37")
+        )
+        clinvar_annotation_cols = [
+            "GeneSymbol",
+            "ClinicalSignificance",
+            "PhenotypeIDS",
+            "PhenotypeList",
+            "Assembly",
         ]
+        for col in clinvar_annotation_cols:
+            if col in clinvar_left.columns:
+                clinvar_left.loc[non_grch37, col] = np.nan
 
         all_candidates = clinvar_left.groupby(variant_key, dropna=False, as_index=False).agg(
             {
                 "Existing_variation": first_non_null,
+                "Feature": first_non_null,
+                "Feature_type": first_non_null,
+                "Consequence": first_non_null,
+                "IMPACT": first_non_null,
+                "CANONICAL": first_non_null,
                 "GeneSymbol": first_non_null,
                 "ClinicalSignificance": first_non_null,
                 "PhenotypeIDS": first_non_null,
@@ -375,25 +473,33 @@ def process_vcf(
         partner_path = os.path.join(haplotype_dir, f"{sample}_variants.vcf")
         freebayes_path = os.path.join(freebayes_dir, f"{sample}_freebayes.vcf")
 
-        all_candidates = attach_sample_metrics(all_candidates, partner_path, freebayes_path)
+        all_candidates = add_report_category(
+            attach_sample_metrics(all_candidates, partner_path, freebayes_path),
+            require_protein_coding_for_rare_high_impact=require_protein_coding_for_rare_high_impact,
+        )
         all_out = build_output_table(all_candidates)
         all_out.to_csv(os.path.join(output_dir, f"{sample}_all_candidates.csv"), index=False)
 
-        dp_gq_zygo = attach_sample_metrics(final, partner_path, freebayes_path)
-        out = build_output_table(dp_gq_zygo)
+        dp_gq_zygo = add_report_category(
+            attach_sample_metrics(final, partner_path, freebayes_path),
+            require_protein_coding_for_rare_high_impact=require_protein_coding_for_rare_high_impact,
+        )
+        clinvar_out = build_output_table(dp_gq_zygo)
+
+        report_candidates = all_out[
+            all_out["ReportCategory"].isin(["clinvar_pathogenic", "rare_high_impact_candidate"])
+        ].copy()
+        out = pd.concat([clinvar_out, report_candidates], ignore_index=True)
+        out = out.drop_duplicates(
+            subset=["Location", "REF_ALLELE", "Allele", "HGVSc", "HGVSp", "ReportCategory"],
+            keep="first",
+        ).reset_index(drop=True)
 
         out.to_csv(os.path.join(output_dir, f"{sample}_raw_output.csv"), index=False)
 
         out_f1 = out[
-            out["CLIN_SIG"].isin(
-                [
-                    "pathogenic",
-                    "pathogenic/established_risk_allele",
-                    "likely_pathogenic",
-                    "pathogenic/likely_pathogenic",
-                ]
-            )
-        ]
+            out["ReportCategory"].isin(["clinvar_pathogenic", "rare_high_impact_candidate"])
+        ].copy()
         out_f1 = out_f1.drop_duplicates(
             subset=out_f1.columns.difference(
                 ["CLIN_SIG", "ClinicalSignificance (ClinVar)", "PhenotypeIDS", "PhenotypeList"]

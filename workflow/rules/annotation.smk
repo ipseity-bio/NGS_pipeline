@@ -48,7 +48,7 @@ rule ensembl_vep_hc:
             --input_file {input.vcf} \
             --output_file {output.vep_out} \
             --tab \
-            --fields "Uploaded_variation,Location,Allele,Gene,Existing_variation,CLIN_SIG,SIFT,PolyPhen,CCDS,SYMBOL,ENSP,BIOTYPE,AF,MAX_AF,PUBMED,VARIANT_CLASS,GENE_PHENO,SOMATIC,PHENO,HGVSg,HGVSc,HGVSp,HGVS_OFFSET,SPDI,ZYG,IND,ALLELE_NUM,REF_ALLELE" \
+            --fields "Uploaded_variation,Location,Allele,Gene,Feature,Feature_type,Consequence,IMPACT,Existing_variation,CLIN_SIG,SIFT,PolyPhen,CCDS,SYMBOL,ENSP,CANONICAL,BIOTYPE,AF,MAX_AF,PUBMED,VARIANT_CLASS,GENE_PHENO,SOMATIC,PHENO,HGVSg,HGVSc,HGVSp,HGVS_OFFSET,SPDI,ZYG,IND,ALLELE_NUM,REF_ALLELE" \
             --cache_version 115 \
             --refseq \
             --show_ref_allele \
@@ -75,8 +75,9 @@ rule ensembl_vep_fb:
             --assembly GRCh37 \
             --fasta {REF} \
             --mane \
+            --canonical \
             --tab \
-            --fields "Uploaded_variation,Location,Allele,Gene,Existing_variation,CLIN_SIG,SIFT,PolyPhen,CCDS,SYMBOL,ENSP,BIOTYPE,AF,MAX_AF,PUBMED,VARIANT_CLASS,GENE_PHENO,SOMATIC,PHENO,HGVSg,HGVSc,HGVSp,HGVS_OFFSET,SPDI,ZYG,IND,ALLELE_NUM,REF_ALLELE" \
+            --fields "Uploaded_variation,Location,Allele,Gene,Feature,Feature_type,Consequence,IMPACT,Existing_variation,CLIN_SIG,SIFT,PolyPhen,CCDS,SYMBOL,ENSP,CANONICAL,BIOTYPE,AF,MAX_AF,PUBMED,VARIANT_CLASS,GENE_PHENO,SOMATIC,PHENO,HGVSg,HGVSc,HGVSp,HGVS_OFFSET,SPDI,ZYG,IND,ALLELE_NUM,REF_ALLELE" \
             --force_overwrite \
             --dir_cache {VEP_CACHE} \
             --cache_version 115 \

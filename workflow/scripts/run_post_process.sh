@@ -82,6 +82,7 @@ report_subdir="$(read_config postprocess.report_dir)"
 qc_min_30x="$(read_config postprocess.qc_min_30x)"
 pc_min_30x="$(read_config postprocess.positive_control_min_30x)"
 ntc_max_30x="$(read_config postprocess.ntc_max_30x)"
+require_protein_coding_for_rare_high_impact="$(read_config reporting.require_protein_coding_for_rare_high_impact)"
 
 annotation_dir="$output_dir/annotation"
 variant_dir="$output_dir/variants"
@@ -100,7 +101,14 @@ run_step() {
   echo "[STEP] $name" | tee -a "$log"
   echo "[CMD ] $*" | tee -a "$log"
   echo "[START] $(date '+%F %T')" | tee -a "$log"
-  /usr/bin/time -f "[ELAPSED] %E  [CPU] user:%U sys:%S  [MAXRSS] %M KB" "$@" 2>>"$log"
+  if command -v /usr/bin/time >/dev/null 2>&1; then
+    /usr/bin/time -f "[ELAPSED] %E  [CPU] user:%U sys:%S  [MAXRSS] %M KB" "$@" 2>>"$log"
+  elif command -v time >/dev/null 2>&1; then
+    time "$@" 2>>"$log"
+  else
+    echo "[WARN] time command not found; running step without timing metrics." | tee -a "$log"
+    "$@" 2>>"$log"
+  fi
   echo "[END] $(date '+%F %T')" | tee -a "$log"
   echo "" | tee -a "$log"
 }
@@ -110,7 +118,8 @@ run_step "run_filter.py" \
   --annotation-dir "$annotation_dir" \
   --variant-dir "$variant_dir" \
   --variant-summary "$variant_summary" \
-  --output-dir "$report_dir"
+  --output-dir "$report_dir" \
+  --require-protein-coding-for-rare-high-impact "$require_protein_coding_for_rare_high_impact"
 
 run_step "depth.py" \
   python3 workflow/scripts/depth.py \
