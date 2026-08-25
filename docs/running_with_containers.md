@@ -39,3 +39,14 @@ snakemake \
   --configfile config/config.yaml
 ```
 
+## Run Post-Processing Only
+
+```bash
+snakemake \
+  --use-singularity \
+  --singularity-args "--bind /home --bind /mnt" \
+  --cores 1 \
+  --snakefile workflow/Snakefile \
+  --configfile config/config.yaml \
+  postprocess_reports
+```

@@ -13,8 +13,18 @@ filter_thresholds:
   DP: 30
   GQ: 99
 
+duplicate_handling:
+  remove_all_duplicates: false
+
+read_groups:
+  enabled: false
+  metadata_file: "config/read_groups.yaml"
+
 reporting:
+  reportable_max_af: 0.001
   require_protein_coding_for_rare_high_impact: true
+  include_rare_moderate_candidates: false
+  require_protein_coding_for_rare_moderate: true
 
 gatk_hard_filters:
   snps:

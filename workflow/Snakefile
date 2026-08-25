@@ -8,6 +8,8 @@ OUTPUT_DIR = Path(config["output_dir"]).resolve()
 REFERENCES = config["references"]
 FILTERS = config["filter_thresholds"]
 HARD_FILTERS = config["gatk_hard_filters"]
+DEDUP = config.get("duplicate_handling", {})
+READ_GROUP_CONFIG = config.get("read_groups", {})
 RESOURCES = config["resources"]
 CONTAINERS = config["containers"]
 POSTPROCESS = config["postprocess"]
@@ -46,6 +48,82 @@ COVERAGE_SUMMARY = REPORT_DIR / f"{OUTPUT_DIR.name}_coverage_summary.csv"
 def input_fastq(sample, read):
     suffix = FASTQ_R1_SUFFIX if read == "R1" else FASTQ_R2_SUFFIX
     return str(INPUT_DIR / f"{sample}{suffix}")
+
+
+
+def parse_scalar(value):
+    value = value.strip()
+    if not value:
+        return ""
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        return value[1:-1]
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    return value
+
+
+def load_simple_yaml(path):
+    root = {}
+    stack = [(-1, root)]
+    with open(path, "r", encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            indent = len(line) - len(line.lstrip(" "))
+            stripped = line.strip()
+            if ":" not in stripped:
+                raise ValueError(f"Unsupported read-group metadata line: {line}")
+            field, value = stripped.split(":", 1)
+            field = field.strip()
+            value = value.strip()
+            while stack and indent <= stack[-1][0]:
+                stack.pop()
+            parent = stack[-1][1]
+            if value == "":
+                parent[field] = {}
+                stack.append((indent, parent[field]))
+            else:
+                parent[field] = parse_scalar(value)
+    return root
+
+
+READ_GROUPS = {}
+if READ_GROUP_CONFIG.get("enabled", False):
+    read_group_file = Path(READ_GROUP_CONFIG["metadata_file"]).resolve()
+    READ_GROUPS = load_simple_yaml(read_group_file).get("samples", {})
+
+
+def read_group_string(sample):
+    values = {
+        "ID": sample,
+        "SM": sample,
+        "LB": "lib1",
+        "PL": "ILLUMINA",
+        "PU": "unit1",
+    }
+    if READ_GROUP_CONFIG.get("enabled", False):
+        sample_values = READ_GROUPS.get(sample)
+        if sample_values is None:
+            raise ValueError(
+                f"Read-group metadata is enabled, but sample '{sample}' is missing from "
+                f"{READ_GROUP_CONFIG['metadata_file']}"
+            )
+        values.update(
+            {key: value for key, value in sample_values.items() if value not in [None, ""]}
+        )
+        values["SM"] = values.get("SM") or sample
+        values["ID"] = values.get("ID") or sample
+
+    ordered_keys = ["ID", "SM", "LB", "PL", "PU", "CN", "DT"]
+    return "@RG" + "".join(
+        f"\\t{key}:{values[key]}" for key in ordered_keys if values.get(key)
+    )
 
 
 rule all:

@@ -35,6 +35,7 @@ config/
 containers/
   postprocess/
 docs/
+tests/
 workflow/
   Snakefile
   rules/
@@ -50,6 +51,8 @@ For standard containerized execution, the host system requires:
 - `bash`
 
 The workflow tools are executed through pinned container images defined in `config/config.yaml`. Host installation of `bwa`, `samtools`, `gatk`, `bcftools`, `freebayes`, `vep`, `bedtools`, `pandas`, or `numpy` is not required for standard containerized workflow execution.
+
+Duplicate handling and read groups are configurable. By default, `duplicate_handling.remove_all_duplicates: false` marks duplicates without removing them; set it to `true` only if duplicate removal has been validated for the assay context. Set `read_groups.enabled: true` and edit `config/read_groups.yaml` to provide per-sample `ID`, `SM`, `LB`, `PL`, `PU`, `CN`, or `DT` fields.
 
 ## Quick Start
 
@@ -94,10 +97,19 @@ Representative outputs include:
 - `reports/<sample>_all_candidates.csv`
 - `reports/<sample>_raw_output.csv`
 - `reports/<sample>_output_p.csv`
-- `reports/*_tp.csv`
-- `reports/*_tp_report.csv`
+- `reports/<sample>_raw_output_filtered_tp.csv`
+- `reports/<sample>_raw_output_filtered_tp_report.csv`
 - `reports/coverage/`
 - `reports/.postprocess.done`
+
+## Report Tiers
+
+The reporting layer uses a candidate-preserving path. `all_candidates.csv` retains all annotated variants after upstream filtering, including variants without dbSNP rsID or ClinVar matches. ClinVar `variant_summary.txt` enrichment uses rsID matching where available and GRCh37 exact CHROM/POS/REF/ALT matching through `Chromosome`, `PositionVCF`, `ReferenceAlleleVCF`, and `AlternateAlleleVCF`, allowing ClinVar records without dbSNP rsID to be annotated when the VCF representation matches. Report-facing outputs include ClinVar pathogenic/likely pathogenic records and rare high-impact candidates by default when `MAX_AF` is missing or `<= reporting.reportable_max_af`. Rare `MODERATE` candidates can be promoted to report-facing outputs with `reporting.include_rare_moderate_candidates: true`; by default, this promotion is restricted to `protein_coding` biotypes through `reporting.require_protein_coding_for_rare_moderate: true`. Report tables include `CallerSupport` labels (`HC` or `FB`; variants seen in both callers are represented as `HC`).
+
+
+Report-category term sets are defined in `workflow/scripts/filter.py`. Users can add locally validated ClinVar clinical-significance terms or VEP consequence terms by updating `PATHOGENIC_CLIN_SIG`, `HIGH_IMPACT_CONSEQUENCES`, or `MODERATE_IMPACT_CONSEQUENCES`, then rerunning the regression tests.
+
+Report-layer regression tests and expected outputs are documented in [Reproducibility](docs/reproducibility.md).
 
 ## Documentation
 
@@ -112,7 +124,7 @@ Detailed setup and usage information is organized under `docs/`:
 
 ## Modularity
 
-The workflow is organized as modular Snakemake rules with configuration-driven paths, thresholds, resource settings, and container definitions. Users can adapt reference resources, filtering thresholds, execution settings, and downstream reporting behavior to their own assay requirements.
+The workflow is organized as modular Snakemake rules with configuration-driven paths, thresholds, resource settings, and container definitions. Users can adapt reference resources, filtering thresholds, execution settings, and downstream reporting behavior to their own validated assay requirements.
 
 ## Test Dataset
 

@@ -82,7 +82,10 @@ report_subdir="$(read_config postprocess.report_dir)"
 qc_min_30x="$(read_config postprocess.qc_min_30x)"
 pc_min_30x="$(read_config postprocess.positive_control_min_30x)"
 ntc_max_30x="$(read_config postprocess.ntc_max_30x)"
+reportable_max_af="$(read_config reporting.reportable_max_af)"
 require_protein_coding_for_rare_high_impact="$(read_config reporting.require_protein_coding_for_rare_high_impact)"
+include_rare_moderate_candidates="$(read_config reporting.include_rare_moderate_candidates)"
+require_protein_coding_for_rare_moderate="$(read_config reporting.require_protein_coding_for_rare_moderate)"
 
 annotation_dir="$output_dir/annotation"
 variant_dir="$output_dir/variants"
@@ -119,7 +122,10 @@ run_step "run_filter.py" \
   --variant-dir "$variant_dir" \
   --variant-summary "$variant_summary" \
   --output-dir "$report_dir" \
-  --require-protein-coding-for-rare-high-impact "$require_protein_coding_for_rare_high_impact"
+  --require-protein-coding-for-rare-high-impact "$require_protein_coding_for_rare_high_impact" \
+  --include-rare-moderate-candidates "$include_rare_moderate_candidates" \
+  --require-protein-coding-for-rare-moderate "$require_protein_coding_for_rare_moderate" \
+  --reportable-max-af "$reportable_max_af"
 
 run_step "depth.py" \
   python3 workflow/scripts/depth.py \
@@ -139,7 +145,8 @@ run_step "True_positive_filter.py" \
   python3 workflow/scripts/True_positive_filter.py \
   --input-dir "$report_dir" \
   --output-dir "$report_dir" \
-  --coverage-summary "$coverage_summary"
+  --coverage-summary "$coverage_summary" \
+  --reportable-max-af "$reportable_max_af"
 
 run_step "coverage_summary.py" \
   python3 workflow/scripts/coverage_summary.py \

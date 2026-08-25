@@ -34,13 +34,15 @@ rule bwa_mem:
     threads: 24
     log:
         str(LOG_DIR / "bwa_mem_{sample}.log")
+    params:
+        read_group=lambda wc: read_group_string(wc.sample)
     container:
         CONTAINERS["bwa"]
     shell:
         """
         mkdir -p {ALIGN_DIR} {LOG_DIR}
         bwa mem -t {threads} \
-            -R "@RG\\tID:{wildcards.sample}\\tSM:{wildcards.sample}\\tLB:lib1\\tPL:ILLUMINA\\tPU:unit1" \
+            -R "{params.read_group}" \
             {BWA_INDEX} {input.r1} {input.r2} \
             > {output.sam} 2> {log}
         """
@@ -92,6 +94,10 @@ rule gatk_MarkDuplicatesSpark:
         tmpdir=lambda wc, attempt: RESOURCES["tmpdir"],
     log:
         str(LOG_DIR / "gatk_mark_duplicates_{sample}.log")
+    params:
+        remove_all_duplicates=lambda wc: str(
+            DEDUP.get("remove_all_duplicates", False)
+        ).lower()
     container:
         CONTAINERS["gatk4"]
     shell:
@@ -101,7 +107,7 @@ rule gatk_MarkDuplicatesSpark:
             MarkDuplicatesSpark \
             -I {input.bam} \
             -O {output.bam} \
-            --remove-all-duplicates true \
+            --remove-all-duplicates {params.remove_all_duplicates} \
             --tmp-dir {resources.tmpdir} \
             > {log} 2>&1
         """

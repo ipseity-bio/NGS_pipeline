@@ -15,7 +15,7 @@ The workflow will not run without GRCh37-matched reference and annotation resour
 
 ## ClinVar Variant Summary Reference
 
-ClinVar variant summary is used during filtering and reporting.
+ClinVar variant summary is used during filtering and reporting. The reporting script enriches variants by dbSNP rsID where available and by exact GRCh37 VCF-style coordinates using `Chromosome`, `PositionVCF`, `ReferenceAlleleVCF`, and `AlternateAlleleVCF`. This allows matching ClinVar records that do not have a dbSNP rsID when their normalized CHROM/POS/REF/ALT representation agrees with the workflow output.
 
 Download source:
 
@@ -49,7 +49,15 @@ bwa index GRCh37.p13.genome.fa
 
 ## VEP Cache Layout
 
-Expected VEP cache layout:
+Expected VEP cache layout depends on the cache type. The evaluated workflow uses VEP with `--refseq`, so a RefSeq cache layout may be used:
+
+```text
+VEP_data/
+  homo_sapiens_refseq/
+    115_GRCh37/
+```
+
+An Ensembl transcript cache may instead use:
 
 ```text
 VEP_data/
@@ -57,7 +65,7 @@ VEP_data/
     115_GRCh37/
 ```
 
-Set this path in `config/config.yaml` under `references.vep_cache`.
+Set the parent cache path in `config/config.yaml` under `references.vep_cache`. The cache version and assembly must match the VEP command (`cache_version 115`, `GRCh37`).
 
 ## Reference Build Note
 

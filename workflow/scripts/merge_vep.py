@@ -55,13 +55,25 @@ def main():
     parser.add_argument("--log", required=True, help="Log file path")
     args = parser.parse_args()
 
-    header_hc, rows_hc = read_vep(args.hc)
+    header_hc, rows_hc_raw = read_vep(args.hc)
     header_fb, rows_fb_raw = read_vep(args.fb)
+
+    base_header = [column for column in header_hc if column != "CallerSupport"]
+    merged_header = base_header + ["CallerSupport"]
+
+    rows_hc = []
+    hc_index = {column: idx for idx, column in enumerate(header_hc)}
+    for row in rows_hc_raw:
+        values = [row[hc_index[column]] if column in hc_index else "" for column in base_header]
+        values.append("HC")
+        rows_hc.append(values)
 
     fb_index = {column: idx for idx, column in enumerate(header_fb)}
     rows_fb = []
     for row in rows_fb_raw:
-        rows_fb.append([row[fb_index[column]] if column in fb_index else "" for column in header_hc])
+        values = [row[fb_index[column]] if column in fb_index else "" for column in base_header]
+        values.append("FB")
+        rows_fb.append(values)
 
     meta = read_meta(args.hc)
 
@@ -69,7 +81,7 @@ def main():
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="") as out_handle:
         out_handle.writelines(meta)
-        out_handle.write("#" + "\t".join(header_hc) + "\n")
+        out_handle.write("#" + "\t".join(merged_header) + "\n")
         writer = csv.writer(out_handle, delimiter="\t", lineterminator="\n")
         writer.writerows(rows_hc)
         writer.writerows(rows_fb)

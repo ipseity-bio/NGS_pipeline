@@ -106,7 +106,7 @@ rule bcftools_filter:
     shell:
         """
         mkdir -p {LOG_DIR}
-        bcftools filter -i '(FORMAT/DP > {params.DP} & FORMAT/GQ >= {params.GQ}) & \
+        bcftools filter -i '(FORMAT/DP >= {params.DP} & FORMAT/GQ >= {params.GQ}) & \
         (GT="0/1" || GT="1/0" || GT="0/2" || GT="2/0" || GT="1/2" || GT="2/1" || GT="1/1" || GT="2/2")' \
         {input.vcf} -Oz -o {output.vcf} > {log} 2>&1
         bcftools index -f {output.vcf} >> {log} 2>&1

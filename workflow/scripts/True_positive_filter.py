@@ -23,11 +23,33 @@ def gt_to_zyg(gt):
     return "-"
 
 
+def format_phenotype_list(value):
+    if pd.isna(value):
+        return "-"
+    generic_terms = {"", "-", ".", "not provided", "not specified"}
+    phenotypes = []
+    seen = set()
+    for part in str(value).split("|"):
+        phenotype = part.strip()
+        if phenotype.lower() in generic_terms:
+            continue
+        if phenotype not in seen:
+            seen.add(phenotype)
+            phenotypes.append(phenotype)
+    return "|".join(phenotypes) if phenotypes else "-"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--coverage-summary", required=True)
+    parser.add_argument(
+        "--reportable-max-af",
+        type=float,
+        default=0.001,
+        help="Maximum population allele frequency for report-facing variant retention.",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -55,11 +77,7 @@ def main() -> None:
         data["Variant"] = data["HGVSc"].str.extract(r"(c\.\S+)")[0] + data["HGVSp"].str.extract(r"(p\.\S+)")[0].radd(" ; ").fillna("")
         data["Inheritance"] = data["ZYG"]
         data["PhenotypeList"] = data["PhenotypeList"].fillna("").astype(str)
-        data["Phenotype"] = data["PhenotypeList"].str.split("|").apply(
-            lambda values: next((p for p in values if p not in ["not provided", "not specified"]), None)
-            if isinstance(values, list)
-            else None
-        )
+        data["Phenotype"] = data["PhenotypeList"].apply(format_phenotype_list)
         if "ReportCategory" not in data.columns:
             data["ReportCategory"] = "candidate"
         data["ReportCategory"] = data["ReportCategory"].fillna("candidate")
@@ -67,7 +85,9 @@ def main() -> None:
         data["ClinicalSignificance (ClinVar)"] = data["ClinicalSignificance (ClinVar)"].fillna("-")
         data["Classification"] = "(" + data["CLIN_SIG"] + " ; " + data["ClinicalSignificance (ClinVar)"] + ")"
         high_impact_label = data["ReportCategory"].eq("rare_high_impact_candidate")
+        moderate_label = data["ReportCategory"].eq("rare_moderate_candidate")
         data.loc[high_impact_label, "Classification"] = "Rare high-impact candidate"
+        data.loc[moderate_label, "Classification"] = "Rare moderate candidate"
         data["Allele State"] = data["ZYG"]
         data["Allelic Read Depths"] = (
             "Ref(" + data["REF_ALLELE"] + "), Alt(" + data["Allele"] + ") VAF:" + (data["VAF (Sample)"] * 100).astype(str) + "%"
@@ -81,15 +101,18 @@ def main() -> None:
 
         rare_or_absent = (
             data["MAX_AF (Population)"].isna()
-            | (data["MAX_AF (Population)"] <= 0.001)
+            | (data["MAX_AF (Population)"] <= args.reportable_max_af)
         )
         clinvar_reportable = (
             data["CLIN_SIG"].isin(["pathogenic", "pathogenic/likely_pathogenic"])
             | data["ClinicalSignificance (ClinVar)"].isin(["Pathogenic", "Pathogenic/Likely pathogenic"])
             | data["ReportCategory"].eq("clinvar_pathogenic")
         )
-        high_impact_reportable = data["ReportCategory"].eq("rare_high_impact_candidate")
-        filtered_data = data[(clinvar_reportable | high_impact_reportable) & rare_or_absent].copy()
+        rare_candidate_reportable = data["ReportCategory"].isin([
+            "rare_high_impact_candidate",
+            "rare_moderate_candidate",
+        ])
+        filtered_data = data[(clinvar_reportable | rare_candidate_reportable) & rare_or_absent].copy()
         if "CANONICAL" not in filtered_data.columns:
             filtered_data["CANONICAL"] = ""
         filtered_data["_canonical_rank"] = (
@@ -109,6 +132,7 @@ def main() -> None:
                 "Classification",
                 "Consequence",
                 "IMPACT",
+                "CallerSupport",
                 "Location",
                 "Allele State",
                 "Allelic Read Depths",
@@ -117,15 +141,23 @@ def main() -> None:
             ]
         ].copy()
 
-        value_md = coverage_df.loc[
-            coverage_df["Sample"].str.contains(sample, na=False), "Mean depth of coverage"
-        ].values[0]
-        report_out["Avg Read Depth"] = f"{value_md}X"
+        sample_str = str(sample).strip()
+        matching_rows = coverage_df[coverage_df["Sample"].astype(str).str.strip() == sample_str]
+        if matching_rows.empty:
+            matching_rows = coverage_df[coverage_df["Sample"].astype(str).str.contains(sample_str, na=False, regex=False)]
 
-        value_p30 = coverage_df.loc[
-            coverage_df["Sample"].str.contains(sample, na=False), "Percentage of bases covered at 30X"
-        ].values[0]
-        report_out["Panel Coverage"] = f"{value_p30}%"
+        if not matching_rows.empty and "Mean depth of coverage" in matching_rows.columns:
+            value_md = matching_rows["Mean depth of coverage"].values[0]
+            report_out["Avg Read Depth"] = f"{value_md}X"
+        else:
+            report_out["Avg Read Depth"] = "-"
+
+        if not matching_rows.empty and "Percentage of bases covered at 30X" in matching_rows.columns:
+            value_p30 = matching_rows["Percentage of bases covered at 30X"].values[0]
+            report_out["Panel Coverage"] = f"{value_p30}%"
+        else:
+            report_out["Panel Coverage"] = "-"
+
         report_out = report_out[["Panel Coverage"] + [col for col in report_out.columns if col != "Panel Coverage"]]
         tp_dedup_subset = ["REF_ALLELE", "Allele", "HGVSg"]
         report_dedup_subset = ["Allele State", "Allelic Read Depths", "Genomic Position"]

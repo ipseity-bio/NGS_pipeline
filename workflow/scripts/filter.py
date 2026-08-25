@@ -1,4 +1,5 @@
 import glob
+import gzip
 import io
 import os
 import re
@@ -10,7 +11,8 @@ import pandas as pd
 def read_vcf_no_meta(path: str) -> pd.DataFrame:
     header = None
     rows = []
-    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
         for raw in handle:
             if raw.startswith("##"):
                 continue
@@ -49,13 +51,86 @@ def parse_sample_by_format(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_pos_candidates(df: pd.DataFrame, location_col: str = "Location") -> pd.DataFrame:
-    start_pos = (
-        df[location_col].astype(str).str.split(r"[:|-]", regex=True).str[1]
-    )
+    start_pos = df[location_col].astype(str).str.split(r"[:|-]", regex=True).str[1]
     start_pos = pd.to_numeric(start_pos, errors="coerce")
     df["POS_START"] = start_pos
     df["POS_ANCHOR"] = start_pos - 1
     return df
+
+
+def normalize_chromosome(value) -> str:
+    text = str(value).strip() if not pd.isna(value) else ""
+    if text.lower().startswith("chr"):
+        text = text[3:]
+    return text
+
+
+def add_vcf_match_keys(df: pd.DataFrame, location_col: str = "Location") -> pd.DataFrame:
+    out = add_pos_candidates(df.copy(), location_col=location_col)
+    out["CHROM_KEY"] = out[location_col].astype(str).str.split(":").str[0].apply(normalize_chromosome)
+    out["REF_KEY"] = out.get("REF_ALLELE", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    out["ALT_KEY"] = out.get("Allele", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    return out
+
+
+def prepare_clinvar_lookup(clinvar: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "RS# (dbSNP)",
+        "GeneSymbol",
+        "ClinicalSignificance",
+        "PhenotypeIDS",
+        "PhenotypeList",
+        "Assembly",
+        "Chromosome",
+        "PositionVCF",
+        "ReferenceAlleleVCF",
+        "AlternateAlleleVCF",
+    ]
+    available = [col for col in columns if col in clinvar.columns]
+    out = clinvar[available].copy()
+    if "Assembly" in out.columns:
+        out = out[out["Assembly"].fillna("").astype(str).str.startswith("GRCh37")].copy()
+    out["rs_id"] = pd.to_numeric(out.get("RS# (dbSNP)", pd.Series(np.nan, index=out.index)), errors="coerce")
+    out["CLINVAR_CHROM_KEY"] = out.get("Chromosome", pd.Series("", index=out.index)).apply(normalize_chromosome)
+    out["CLINVAR_POS"] = pd.to_numeric(out.get("PositionVCF", pd.Series(np.nan, index=out.index)), errors="coerce")
+    out["CLINVAR_REF_KEY"] = out.get("ReferenceAlleleVCF", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    out["CLINVAR_ALT_KEY"] = out.get("AlternateAlleleVCF", pd.Series("", index=out.index)).fillna("").astype(str).str.strip()
+    return out
+
+
+def merge_clinvar_annotations(vcf_lookup: pd.DataFrame, clinvar_lookup: pd.DataFrame) -> pd.DataFrame:
+    keyed_vcf = add_vcf_match_keys(vcf_lookup, location_col="Location")
+    rsid_lookup = clinvar_lookup[
+        clinvar_lookup["rs_id"].notna() & (clinvar_lookup["rs_id"] > 0)
+    ].copy()
+
+    rsid_matches = keyed_vcf.merge(
+        rsid_lookup,
+        on="rs_id",
+        how="left",
+    )
+
+    coordinate_lookup = clinvar_lookup[
+        clinvar_lookup["CLINVAR_CHROM_KEY"].ne("")
+        & clinvar_lookup["CLINVAR_POS"].notna()
+        & clinvar_lookup["CLINVAR_REF_KEY"].ne("")
+        & clinvar_lookup["CLINVAR_ALT_KEY"].ne("")
+    ].drop(columns=["rs_id", "RS# (dbSNP)"], errors="ignore")
+
+    start_matches = keyed_vcf.merge(
+        coordinate_lookup,
+        left_on=["CHROM_KEY", "POS_START", "REF_KEY", "ALT_KEY"],
+        right_on=["CLINVAR_CHROM_KEY", "CLINVAR_POS", "CLINVAR_REF_KEY", "CLINVAR_ALT_KEY"],
+        how="left",
+    )
+    anchor_matches = keyed_vcf.merge(
+        coordinate_lookup,
+        left_on=["CHROM_KEY", "POS_ANCHOR", "REF_KEY", "ALT_KEY"],
+        right_on=["CLINVAR_CHROM_KEY", "CLINVAR_POS", "CLINVAR_REF_KEY", "CLINVAR_ALT_KEY"],
+        how="left",
+    )
+
+    return pd.concat([rsid_matches, start_matches, anchor_matches], ignore_index=True, sort=False)
 
 
 def load_freebayes_full(freebayes_path: str) -> pd.DataFrame:
@@ -111,11 +186,75 @@ def first_non_null(series: pd.Series):
     return np.nan
 
 
+def split_terms(value) -> list[str]:
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if text in {"", "-", "."}:
+        return []
+    return [
+        part.strip()
+        for part in re.split(r"[,|;]", text)
+        if part.strip() and part.strip() not in {"-", "."}
+    ]
+
+
+def normalize_term(value: str) -> str:
+    return re.sub(r"\s+", "_", str(value).strip().lower())
+
+
+def aggregate_unique(series: pd.Series):
+    values = []
+    seen = set()
+    for value in series.dropna():
+        text = str(value).strip()
+        if not text or text in {"-", "."}:
+            continue
+        for part in split_terms(text):
+            if part not in seen:
+                seen.add(part)
+                values.append(part)
+    if values:
+        return "|".join(values)
+    return np.nan
+
+
+def normalize_caller_value(value) -> str:
+    text = str(value).strip() if not pd.isna(value) else ""
+    lowered = text.lower()
+    if lowered in {"hc", "hc_only", "concordant"}:
+        return "HC"
+    if lowered in {"fb", "fb_only"}:
+        return "FB"
+    terms = {term.lower() for term in split_terms(text)}
+    if {"hc", "hc_only", "concordant"} & terms:
+        return "HC"
+    if {"fb", "fb_only"} & terms:
+        return "FB"
+    return ""
+
+
+def aggregate_caller_support(series: pd.Series):
+    values = [normalize_caller_value(value) for value in series.dropna()]
+    if "HC" in values:
+        return "HC"
+    if "FB" in values:
+        return "FB"
+    return np.nan
+
+
+def canonical_rank(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.upper().eq("YES").astype(int)
+
+
 PATHOGENIC_CLIN_SIG = {
     "pathogenic",
     "pathogenic/established_risk_allele",
     "likely_pathogenic",
     "pathogenic/likely_pathogenic",
+    "pathogenic/likely pathogenic",
+    "pathogenic_low_penetrance",
+    "pathogenic/low_penetrance",
 }
 
 HIGH_IMPACT_CONSEQUENCES = {
@@ -131,47 +270,165 @@ HIGH_IMPACT_CONSEQUENCES = {
     "feature_truncation",
 }
 
+MODERATE_IMPACT_CONSEQUENCES = {
+    "missense_variant",
+    "inframe_insertion",
+    "inframe_deletion",
+    "protein_altering_variant",
+    "coding_sequence_variant",
+    "regulatory_region_ablation",
+}
+
 
 def is_pathogenic_clinvar(df: pd.DataFrame) -> pd.Series:
-    clin_sig = df.get("CLIN_SIG", pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
-    clinical = df.get("ClinicalSignificance", pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
-    return clin_sig.isin(PATHOGENIC_CLIN_SIG) | clinical.isin(
-        {"pathogenic", "pathogenic/likely pathogenic", "likely pathogenic"}
-    )
+    def has_pathogenic_term(row) -> bool:
+        terms = split_terms(row.get("CLIN_SIG", ""))
+        terms.extend(split_terms(row.get("ClinicalSignificance", "")))
+        return any(normalize_term(term) in PATHOGENIC_CLIN_SIG for term in terms)
+
+    return df.apply(has_pathogenic_term, axis=1)
 
 
 def is_rare_high_impact_candidate(
-    df: pd.DataFrame, require_protein_coding: bool = True
+    df: pd.DataFrame,
+    require_protein_coding: bool = True,
+    reportable_max_af: float = 0.001,
 ) -> pd.Series:
     impact = df.get("IMPACT", pd.Series("", index=df.index)).fillna("").astype(str).str.upper()
     consequence = df.get("Consequence", pd.Series("", index=df.index)).fillna("").astype(str)
-    has_high_impact = impact.apply(lambda value: "HIGH" in re.split(r"[,&]", value))
+    has_high_impact = impact.apply(lambda value: "HIGH" in re.split(r"[,&|;]", value))
     has_high_consequence = consequence.apply(
-        lambda value: any(term in HIGH_IMPACT_CONSEQUENCES for term in re.split(r"[,&]", value))
+        lambda value: any(term in HIGH_IMPACT_CONSEQUENCES for term in re.split(r"[,&|;]", value))
     )
     max_af = pd.to_numeric(df.get("MAX_AF", pd.Series(np.nan, index=df.index)), errors="coerce")
     biotype = df.get("BIOTYPE", pd.Series("", index=df.index)).fillna("").astype(str)
-    rare = max_af.isna() | (max_af <= 0.001)
+    rare = max_af.isna() | (max_af <= reportable_max_af)
     if require_protein_coding:
-        biotype_ok = biotype.eq("protein_coding") | biotype.eq("")
+        biotype_ok = biotype.eq("protein_coding")
     else:
         biotype_ok = pd.Series(True, index=df.index)
     return rare & biotype_ok & (has_high_impact | has_high_consequence)
 
 
+def is_rare_moderate_candidate(
+    df: pd.DataFrame,
+    reportable_max_af: float = 0.001,
+    require_protein_coding: bool = True,
+) -> pd.Series:
+    impact = df.get("IMPACT", pd.Series("", index=df.index)).fillna("").astype(str).str.upper()
+    consequence = df.get("Consequence", pd.Series("", index=df.index)).fillna("").astype(str)
+    max_af = pd.to_numeric(df.get("MAX_AF", pd.Series(np.nan, index=df.index)), errors="coerce")
+    biotype = df.get("BIOTYPE", pd.Series("", index=df.index)).fillna("").astype(str)
+    rare = max_af.isna() | (max_af <= reportable_max_af)
+    has_moderate_impact = impact.apply(lambda value: "MODERATE" in re.split(r"[,&|;]", value))
+    has_moderate_consequence = consequence.apply(
+        lambda value: any(term in MODERATE_IMPACT_CONSEQUENCES for term in re.split(r"[,&|;]", value))
+    )
+    if require_protein_coding:
+        biotype_ok = biotype.eq("protein_coding")
+    else:
+        biotype_ok = pd.Series(True, index=df.index)
+    return rare & biotype_ok & (has_moderate_impact | has_moderate_consequence)
+
+
 def add_report_category(
-    df: pd.DataFrame, require_protein_coding_for_rare_high_impact: bool = True
+    df: pd.DataFrame,
+    require_protein_coding_for_rare_high_impact: bool = True,
+    include_rare_moderate_candidates: bool = False,
+    require_protein_coding_for_rare_moderate: bool = True,
+    reportable_max_af: float = 0.001,
 ) -> pd.DataFrame:
     out = df.copy()
     pathogenic = is_pathogenic_clinvar(out)
     high_impact = is_rare_high_impact_candidate(
-        out, require_protein_coding=require_protein_coding_for_rare_high_impact
+        out,
+        require_protein_coding=require_protein_coding_for_rare_high_impact,
+        reportable_max_af=reportable_max_af,
+    )
+    moderate = (
+        is_rare_moderate_candidate(
+            out,
+            reportable_max_af=reportable_max_af,
+            require_protein_coding=require_protein_coding_for_rare_moderate,
+        )
+        if include_rare_moderate_candidates
+        else pd.Series(False, index=out.index)
     )
     out["ReportCategory"] = np.select(
-        [pathogenic, high_impact],
-        ["clinvar_pathogenic", "rare_high_impact_candidate"],
+        [pathogenic, high_impact, moderate],
+        ["clinvar_pathogenic", "rare_high_impact_candidate", "rare_moderate_candidate"],
         default="candidate",
     )
+    return out
+
+
+def vcf_variant_keys(path: str) -> set[tuple[str, int, str, str]]:
+    if not os.path.exists(path):
+        return set()
+    variants = read_vcf_no_meta(path)
+    keys = set()
+    for _, row in variants.iterrows():
+        chrom = str(row.get("CHROM", "")).strip()
+        pos = pd.to_numeric(row.get("POS"), errors="coerce")
+        ref = str(row.get("REF", "")).strip()
+        alts = str(row.get("ALT", "")).split(",")
+        if not chrom or pd.isna(pos) or not ref:
+            continue
+        for alt in alts:
+            alt = alt.strip()
+            if alt:
+                keys.add((chrom, int(pos), ref, alt))
+    return keys
+
+
+def add_caller_support(
+    df: pd.DataFrame, hc_filtered_path: str, fb_filtered_path: str
+) -> pd.DataFrame:
+    out = df.copy()
+
+    def support_from_vcf(row, hc_keys, fb_keys) -> str:
+        chrom = str(row.get("Location", "")).split(":")[0]
+        ref = str(row.get("REF_ALLELE", "")).strip()
+        alt = str(row.get("Allele", "")).strip()
+        positions = [
+            pd.to_numeric(row.get("POS_START"), errors="coerce"),
+            pd.to_numeric(row.get("POS_ANCHOR"), errors="coerce"),
+        ]
+        candidate_keys = {
+            (chrom, int(pos), ref, alt)
+            for pos in positions
+            if pd.notna(pos) and ref and alt
+        }
+        in_hc = any(key in hc_keys for key in candidate_keys)
+        in_fb = any(key in fb_keys for key in candidate_keys)
+        if in_hc:
+            return "HC"
+        if in_fb:
+            return "FB"
+        raise ValueError(
+            "CallerSupport could not be resolved for "
+            f"{row.get('Location')} {row.get('REF_ALLELE')}>{row.get('Allele')}. "
+            "Regenerate merged VEP files with the current merge_vep.py so each row is tagged as HC or FB."
+        )
+
+    if "CallerSupport" in out.columns:
+        normalized = out["CallerSupport"].apply(normalize_caller_value)
+        needs_fallback = normalized.eq("")
+        out["CallerSupport"] = normalized
+        if needs_fallback.any():
+            hc_keys = vcf_variant_keys(hc_filtered_path)
+            fb_keys = vcf_variant_keys(fb_filtered_path)
+            out = add_pos_candidates(out, location_col="Location")
+            out.loc[needs_fallback, "CallerSupport"] = out.loc[needs_fallback].apply(
+                lambda row: support_from_vcf(row, hc_keys, fb_keys), axis=1
+            )
+    else:
+        hc_keys = vcf_variant_keys(hc_filtered_path)
+        fb_keys = vcf_variant_keys(fb_filtered_path)
+        out = add_pos_candidates(out, location_col="Location")
+        out["CallerSupport"] = out.apply(
+            lambda row: support_from_vcf(row, hc_keys, fb_keys), axis=1
+        )
     return out
 
 
@@ -230,15 +487,29 @@ def attach_sample_metrics(
         value_columns=list(haplocall.columns),
     )
 
-    out["Genotype (GT)"] = out[sample_col].str.split(":").str[0]
-    out["Depth of Coverage (DP)"] = out[sample_col].str.split(":").str[2]
-    out["Genotype Quality (GQ)"] = out[sample_col].str.split(":").str[3]
-    out["AD_ALT"] = out[sample_col].str.split(":").str[1].str.split(",").str[1]
-    out["AD_ALT"] = pd.to_numeric(out["AD_ALT"], errors="coerce")
-    out["Depth of Coverage (DP)"] = pd.to_numeric(
-        out["Depth of Coverage (DP)"], errors="coerce"
-    )
-    out["VAF (Sample)"] = out["AD_ALT"] / out["Depth of Coverage (DP)"]
+    if "FORMAT" in out.columns:
+        fmt_keys = out["FORMAT"].fillna("").astype(str).str.split(":")
+        sample_vals = out[sample_col].fillna("").astype(str).str.split(":")
+        parsed = []
+        for keys, vals in zip(fmt_keys, sample_vals):
+            parsed.append({k: v for k, v in zip(keys, vals)})
+        parsed_df = pd.DataFrame(parsed)
+        for col in ["GT", "DP", "GQ", "AD"]:
+            if col not in parsed_df.columns:
+                parsed_df[col] = np.nan
+        out["Genotype (GT)"] = parsed_df["GT"]
+        out["Depth of Coverage (DP)"] = pd.to_numeric(parsed_df["DP"], errors="coerce")
+        out["Genotype Quality (GQ)"] = pd.to_numeric(parsed_df["GQ"], errors="coerce")
+        ad_alt = parsed_df["AD"].astype(str).str.split(",").str[1]
+        out["AD_ALT"] = pd.to_numeric(ad_alt, errors="coerce")
+        out["VAF (Sample)"] = out["AD_ALT"] / out["Depth of Coverage (DP)"]
+    else:
+        out["Genotype (GT)"] = out[sample_col].str.split(":").str[0]
+        out["Depth of Coverage (DP)"] = pd.to_numeric(out[sample_col].str.split(":").str[2], errors="coerce")
+        out["Genotype Quality (GQ)"] = pd.to_numeric(out[sample_col].str.split(":").str[3], errors="coerce")
+        ad_alt = out[sample_col].str.split(":").str[1].str.split(",").str[1]
+        out["AD_ALT"] = pd.to_numeric(ad_alt, errors="coerce")
+        out["VAF (Sample)"] = out["AD_ALT"] / out["Depth of Coverage (DP)"]
 
     if os.path.exists(freebayes_path):
         fb_full = load_freebayes_full(freebayes_path)
@@ -316,6 +587,7 @@ def build_output_table(df: pd.DataFrame) -> pd.DataFrame:
         "CLIN_SIG",
         "ClinicalSignificance",
         "ReportCategory",
+        "CallerSupport",
         "SPDI",
         "HGVSg",
         "HGVSc",
@@ -332,7 +604,10 @@ def build_output_table(df: pd.DataFrame) -> pd.DataFrame:
         "PhenotypeIDS",
         "PhenotypeList",
     ]
-    out = fill_missing_columns(df, columns)[columns].drop_duplicates().reset_index(drop=True)
+    out = fill_missing_columns(df, columns)
+    out["_canonical_rank"] = canonical_rank(out["CANONICAL"])
+    out = out.sort_values("_canonical_rank", ascending=False)
+    out = out[columns].drop_duplicates().reset_index(drop=True)
 
     out = out.rename(
         columns={
@@ -350,15 +625,27 @@ def process_vcf(
     haplotype_dir: str,
     freebayes_dir: str,
     require_protein_coding_for_rare_high_impact: bool = True,
+    include_rare_moderate_candidates: bool = False,
+    require_protein_coding_for_rare_moderate: bool = True,
+    reportable_max_af: float = 0.001,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
     files = sorted(glob.glob(file_pattern))
     clinvar = pd.read_csv(variant_summary_path, sep="\t", low_memory=False)
+    clinvar_lookup = prepare_clinvar_lookup(clinvar)
 
     for file in files:
         vcf = read_vep_tab(file)
         if "#CHROM" in vcf.columns:
             vcf = vcf.rename(columns={"#CHROM": "CHROM"})
+
+        requires_biotype = require_protein_coding_for_rare_high_impact or (
+            include_rare_moderate_candidates and require_protein_coding_for_rare_moderate
+        )
+        if "BIOTYPE" not in vcf.columns and requires_biotype:
+            raise ValueError(
+                f"BIOTYPE column missing in {file}; cannot enforce protein-coding rare candidate gate."
+            )
 
         variant_key = [
             col
@@ -382,12 +669,15 @@ def process_vcf(
                 "PolyPhen",
                 "MAX_AF",
                 "ZYG",
-                "CLIN_SIG",
             ]
             if col in vcf.columns
         ]
 
         vcf_lookup = vcf.copy()
+        if "Existing_variation" not in vcf_lookup.columns:
+            vcf_lookup["Existing_variation"] = ""
+        if "CallerSupport" not in vcf_lookup.columns:
+            vcf_lookup["CallerSupport"] = ""
         vcf_lookup["Existing_variation"] = vcf_lookup["Existing_variation"].fillna("").astype(str)
         vcf_lookup["Existing_variation"] = vcf_lookup["Existing_variation"].str.split(",")
         vcf_lookup = vcf_lookup.explode("Existing_variation")
@@ -398,40 +688,22 @@ def process_vcf(
             downcast="integer",
         )
 
-        clinvar_left = pd.merge(
-            vcf_lookup,
-            clinvar,
-            left_on="rs_id",
-            right_on="RS# (dbSNP)",
-            how="left",
-        )
-        non_grch37 = (
-            clinvar_left["Assembly"].notna()
-            & ~clinvar_left["Assembly"].astype(str).str.startswith("GRCh37")
-        )
-        clinvar_annotation_cols = [
-            "GeneSymbol",
-            "ClinicalSignificance",
-            "PhenotypeIDS",
-            "PhenotypeList",
-            "Assembly",
-        ]
-        for col in clinvar_annotation_cols:
-            if col in clinvar_left.columns:
-                clinvar_left.loc[non_grch37, col] = np.nan
+        clinvar_left = merge_clinvar_annotations(vcf_lookup, clinvar_lookup)
 
         all_candidates = clinvar_left.groupby(variant_key, dropna=False, as_index=False).agg(
             {
-                "Existing_variation": first_non_null,
+                "Existing_variation": aggregate_unique,
+                "CLIN_SIG": aggregate_unique,
+                "CallerSupport": aggregate_caller_support,
                 "Feature": first_non_null,
                 "Feature_type": first_non_null,
                 "Consequence": first_non_null,
                 "IMPACT": first_non_null,
                 "CANONICAL": first_non_null,
                 "GeneSymbol": first_non_null,
-                "ClinicalSignificance": first_non_null,
-                "PhenotypeIDS": first_non_null,
-                "PhenotypeList": first_non_null,
+                "ClinicalSignificance": aggregate_unique,
+                "PhenotypeIDS": aggregate_unique,
+                "PhenotypeList": aggregate_unique,
                 "rs_id": first_non_null,
             }
         )
@@ -439,70 +711,48 @@ def process_vcf(
             all_candidates.get("SYMBOL")
         )
 
-        x = vcf_lookup[vcf_lookup["Existing_variation"].str.startswith("rs")].copy()
-        x["rs_id"] = pd.to_numeric(
-            x["Existing_variation"].str.replace("rs", "", regex=False),
-            errors="coerce",
-            downcast="integer",
-        )
-
-        result_df = pd.merge(
-            x, clinvar, left_on="rs_id", right_on="RS# (dbSNP)", how="inner"
-        )
-        result_df = result_df[
-            result_df["Assembly"].astype(str).str.startswith("GRCh37")
-        ].drop_duplicates()
-
-        result_df["CLIN_SIG"] = result_df["CLIN_SIG"].str.split(",")
-        result_df = result_df.explode("CLIN_SIG").drop_duplicates().reset_index(drop=True)
-        final = result_df.drop_duplicates(
-            subset=[
-                "SPDI",
-                "CLIN_SIG",
-                "REF_ALLELE",
-                "Allele",
-                "Existing_variation",
-                "PhenotypeList",
-            ],
-            keep="first",
-        ).reset_index(drop=True)
-
         fname = os.path.basename(file)
         sample = fname.replace("_merged_vep.vcf", "").replace("_vep.vcf", "")
 
         partner_path = os.path.join(haplotype_dir, f"{sample}_variants.vcf")
         freebayes_path = os.path.join(freebayes_dir, f"{sample}_freebayes.vcf")
+        hc_filtered_path = os.path.join(haplotype_dir, f"{sample}_filtered.vcf.gz")
+        fb_filtered_path = os.path.join(freebayes_dir, f"{sample}_freebayes_filtered.vcf.gz")
 
         all_candidates = add_report_category(
-            attach_sample_metrics(all_candidates, partner_path, freebayes_path),
+            add_caller_support(
+                attach_sample_metrics(all_candidates, partner_path, freebayes_path),
+                hc_filtered_path,
+                fb_filtered_path,
+            ),
             require_protein_coding_for_rare_high_impact=require_protein_coding_for_rare_high_impact,
+            include_rare_moderate_candidates=include_rare_moderate_candidates,
+            require_protein_coding_for_rare_moderate=require_protein_coding_for_rare_moderate,
+            reportable_max_af=reportable_max_af,
         )
         all_out = build_output_table(all_candidates)
         all_out.to_csv(os.path.join(output_dir, f"{sample}_all_candidates.csv"), index=False)
 
-        dp_gq_zygo = add_report_category(
-            attach_sample_metrics(final, partner_path, freebayes_path),
-            require_protein_coding_for_rare_high_impact=require_protein_coding_for_rare_high_impact,
-        )
-        clinvar_out = build_output_table(dp_gq_zygo)
+        report_categories = [
+            "clinvar_pathogenic",
+            "rare_high_impact_candidate",
+        ]
+        if include_rare_moderate_candidates:
+            report_categories.append("rare_moderate_candidate")
 
-        report_candidates = all_out[
-            all_out["ReportCategory"].isin(["clinvar_pathogenic", "rare_high_impact_candidate"])
-        ].copy()
-        out = pd.concat([clinvar_out, report_candidates], ignore_index=True)
+        max_af_population = pd.to_numeric(
+            all_out.get("MAX_AF (Population)", pd.Series(np.nan, index=all_out.index)),
+            errors="coerce",
+        )
+        rare_or_absent = max_af_population.isna() | (max_af_population <= reportable_max_af)
+        reportable = all_out["ReportCategory"].isin(report_categories) & rare_or_absent
+        out = all_out[reportable].copy()
+        out["_canonical_rank"] = canonical_rank(out["CANONICAL"])
+        out = out.sort_values("_canonical_rank", ascending=False)
         out = out.drop_duplicates(
             subset=["Location", "REF_ALLELE", "Allele", "HGVSc", "HGVSp", "ReportCategory"],
             keep="first",
-        ).reset_index(drop=True)
+        ).drop(columns=["_canonical_rank"], errors="ignore").reset_index(drop=True)
 
         out.to_csv(os.path.join(output_dir, f"{sample}_raw_output.csv"), index=False)
-
-        out_f1 = out[
-            out["ReportCategory"].isin(["clinvar_pathogenic", "rare_high_impact_candidate"])
-        ].copy()
-        out_f1 = out_f1.drop_duplicates(
-            subset=out_f1.columns.difference(
-                ["CLIN_SIG", "ClinicalSignificance (ClinVar)", "PhenotypeIDS", "PhenotypeList"]
-            )
-        )
-        out_f1.to_csv(os.path.join(output_dir, f"{sample}_output_p.csv"), index=False)
+        out.to_csv(os.path.join(output_dir, f"{sample}_output_p.csv"), index=False)
